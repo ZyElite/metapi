@@ -1068,5 +1068,11 @@ export function isEndpointDowngradeError(status: number, upstreamErrorText?: str
     || parsedMessage.includes('no route matched')
     || parsedMessage.includes('does not exist')
     || parsedMessage.includes('bad_response_status_code')
+    || (
+      status === 400
+      && parsedCode === 'invalid_request'
+      && parsedType === 'new_api_error'
+      && (parsedMessage.includes('claude code cli') || text.includes('claude code cli'))
+    )
   );
 }
