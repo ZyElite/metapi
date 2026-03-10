@@ -352,6 +352,42 @@ export default function Accounts() {
     }
   };
 
+  const formatModelSuccess = (refresh: any) => {
+    const models = Array.isArray(refresh?.modelsPreview) ? refresh.modelsPreview : [];
+    const count = Number.isFinite(refresh?.modelCount) ? refresh.modelCount : models.length;
+    if (models.length === 0) return `已获取到模型（共 ${count} 个）`;
+    const preview = models.slice(0, 6).join('、');
+    const suffix = `（共 ${count} 个）`;
+    return `已获取到模型：${preview}${suffix}`;
+  };
+
+  const formatModelFailure = (refresh: any, messageFallback?: string) => {
+    const code = refresh?.errorCode;
+    if (code === 'timeout') return '模型获取失败（请求超时）';
+    if (code === 'unauthorized') return '模型获取失败，API Key 已无效';
+    if (code === 'empty_models') return '模型获取失败：未获取到可用模型';
+    return messageFallback || refresh?.errorMessage || '模型获取失败';
+  };
+
+  const handleCheckModels = async (accountId: number) => {
+    const key = `models-${accountId}`;
+    setActionLoading(s => ({ ...s, [key]: true }));
+    try {
+      const result = await api.checkModels(accountId);
+      const refresh = result?.refresh;
+      if (!refresh || refresh.status !== 'success') {
+        toast.error(formatModelFailure(refresh, result?.message));
+      } else {
+        toast.success(formatModelSuccess(refresh));
+      }
+    } catch (e: any) {
+      toast.error(e.message || '模型获取失败');
+    } finally {
+      setActionLoading(s => ({ ...s, [key]: false }));
+      void load();
+    }
+  };
+
   const inputStyle: React.CSSProperties = {
     width: '100%', padding: '10px 14px', border: '1px solid var(--color-border)',
     borderRadius: 'var(--radius-sm)', fontSize: 13, outline: 'none',
@@ -1685,7 +1721,7 @@ export default function Accounts() {
                                 {actionLoading[`refresh-${a.id}`] ? <span className="spinner spinner-sm" /> : '刷新'}
                               </button>
                             )}
-                            <button onClick={() => withLoading(`models-${a.id}`, () => api.checkModels(a.id), '模型已更新')} disabled={actionLoading[`models-${a.id}`]} className="btn btn-link btn-link-info">
+                            <button onClick={() => handleCheckModels(a.id)} disabled={actionLoading[`models-${a.id}`]} className="btn btn-link btn-link-info">
                               {actionLoading[`models-${a.id}`] ? <span className="spinner spinner-sm" /> : '模型'}
                             </button>
                             {capabilities.canCheckin && (
