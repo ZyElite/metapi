@@ -208,12 +208,82 @@ describe('sqlite migrate bootstrap', () => {
     sqlite.close();
   });
 
+  it('recovers duplicate-column errors inside multi-statement migrations by replaying the full migration', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-recover-multi-'));
+    process.env.DATA_DIR = dataDir;
+    vi.resetModules();
+
+    const migrateModule = await import('./migrate.js');
+    const { __migrateTestUtils } = migrateModule;
+
+    const sqlite = new Database(':memory:');
+    sqlite.exec(`
+      CREATE TABLE account_tokens (
+        id integer PRIMARY KEY AUTOINCREMENT NOT NULL,
+        token_group text
+      );
+    `);
+
+    const tempMigrationsDir = mkdtempSync(join(tmpdir(), 'metapi-migration-files-multi-'));
+    mkdirSync(join(tempMigrationsDir, 'meta'), { recursive: true });
+
+    writeFileSync(
+      join(tempMigrationsDir, 'meta', '_journal.json'),
+      JSON.stringify({
+        entries: [
+          {
+            tag: '0008_sqlite_schema_backfill',
+            when: 1772600000000,
+          },
+        ],
+      }),
+    );
+
+    writeFileSync(
+      join(tempMigrationsDir, '0008_sqlite_schema_backfill.sql'),
+      [
+        'CREATE TABLE IF NOT EXISTS `downstream_api_keys` (`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL);',
+        'ALTER TABLE `account_tokens` ADD `token_group` text;',
+      ].join('\n--> statement-breakpoint\n'),
+    );
+
+    const duplicateColumnError = new Error(
+      "DrizzleError: Failed to run the query 'ALTER TABLE `account_tokens` ADD `token_group` text;\n' duplicate column name: token_group",
+    );
+
+    const recovered = __migrateTestUtils.tryRecoverDuplicateColumnMigrationError(
+      sqlite,
+      tempMigrationsDir,
+      duplicateColumnError,
+    );
+
+    expect(recovered).toBe(true);
+
+    const createdTable = sqlite
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'downstream_api_keys'")
+      .get() as { name?: string } | undefined;
+    const applied = sqlite
+      .prepare('SELECT hash, created_at FROM __drizzle_migrations')
+      .all() as Array<{ hash: string; created_at: number }>;
+
+    expect(createdTable?.name).toBe('downstream_api_keys');
+    expect(applied).toHaveLength(1);
+    expect(Number(applied[0].created_at)).toBe(1772600000000);
+
+    sqlite.close();
+  });
+
   it('replays missing migrations before marking a duplicate-column migration as applied', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'metapi-migrate-partial-journal-'));
     const dbPath = join(dataDir, 'hub.db');
     const sqlite = new Database(dbPath);
     const journalEntries = readMigrationJournalEntries();
-    const appliedEntries = journalEntries.filter((entry) => entry.tag !== '0006_site_disabled_models' && entry.tag !== '0007_account_token_group');
+    const missingTags = new Set([
+      '0006_site_disabled_models',
+      '0007_account_token_group',
+      '0008_sqlite_schema_backfill',
+    ]);
+    const appliedEntries = journalEntries.filter((entry) => !missingTags.has(entry.tag));
 
     for (const entry of appliedEntries) {
       const sqlText = readFileSync(join(migrationsDir, `${entry.tag}.sql`), 'utf8');
@@ -239,8 +309,12 @@ describe('sqlite migrate bootstrap', () => {
     const disabledModelsTable = verified
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'site_disabled_models'")
       .get() as { name?: string } | undefined;
+    const downstreamApiKeysTable = verified
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'downstream_api_keys'")
+      .get() as { name?: string } | undefined;
 
     expect(disabledModelsTable?.name).toBe('site_disabled_models');
+    expect(downstreamApiKeysTable?.name).toBe('downstream_api_keys');
     expect(appliedRows.map((row) => Number(row.created_at))).toEqual(
       journalEntries.map((entry) => entry.when),
     );
