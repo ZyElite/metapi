@@ -1,19 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  startCodexLoopbackCallbackServer,
-  stopCodexLoopbackCallbackServer,
+  startOAuthLoopbackCallbackServer,
+  stopOAuthLoopbackCallbackServers,
 } from './localCallbackServer.js';
 
-describe('codex loopback callback server', () => {
+describe('oauth loopback callback server', () => {
   afterEach(async () => {
-    await stopCodexLoopbackCallbackServer();
+    await stopOAuthLoopbackCallbackServers();
   });
 
-  it('accepts oauth callback requests and closes the popup on success', async () => {
+  it('accepts codex oauth callback requests and closes the popup on success', async () => {
     const callbackHandler = vi.fn(async () => ({ accountId: 12, siteId: 34 }));
-    const started = await startCodexLoopbackCallbackServer({
-      host: '127.0.0.1',
-      port: 0,
+    const started = await startOAuthLoopbackCallbackServer('codex', {
       callbackHandler,
     });
 
@@ -30,20 +28,19 @@ describe('codex loopback callback server', () => {
     expect(body).toContain('window.close()');
   });
 
-  it('renders an error page when oauth completion fails', async () => {
+  it('renders a stable error page when oauth completion fails', async () => {
     const callbackHandler = vi.fn(async () => {
       throw new Error('oauth failed');
     });
-    const started = await startCodexLoopbackCallbackServer({
-      host: '127.0.0.1',
-      port: 0,
+    const started = await startOAuthLoopbackCallbackServer('claude', {
       callbackHandler,
     });
 
-    const response = await fetch(`${started.origin}/auth/callback?state=test-state&code=test-code`);
+    const response = await fetch(`${started.origin}/callback?state=test-state&code=test-code`);
     const body = await response.text();
 
     expect(response.status).toBe(500);
-    expect(body).toContain('oauth failed');
+    expect(body).toContain('OAuth authorization failed');
+    expect(body).not.toContain('oauth failed');
   });
 });

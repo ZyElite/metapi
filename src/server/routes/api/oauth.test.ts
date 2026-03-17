@@ -27,6 +27,10 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   beforeAll(async () => {
     dataDir = mkdtempSync(join(tmpdir(), 'metapi-oauth-routes-'));
     process.env.DATA_DIR = dataDir;
+    process.env.CODEX_CLIENT_ID = 'test-codex-client-id';
+    process.env.CLAUDE_CLIENT_ID = 'test-claude-client-id';
+    process.env.GEMINI_CLI_CLIENT_ID = 'test-gemini-client-id';
+    process.env.GEMINI_CLI_CLIENT_SECRET = 'test-gemini-client-secret';
 
     await import('../../db/migrate.js');
     const dbModule = await import('../../db/index.js');
@@ -52,9 +56,13 @@ describe('oauth routes', { timeout: 15_000 }, () => {
   afterAll(async () => {
     await app.close();
     delete process.env.DATA_DIR;
+    delete process.env.CODEX_CLIENT_ID;
+    delete process.env.CLAUDE_CLIENT_ID;
+    delete process.env.GEMINI_CLI_CLIENT_ID;
+    delete process.env.GEMINI_CLI_CLIENT_SECRET;
   });
 
-  it('lists codex oauth provider metadata', async () => {
+  it('lists multi-provider oauth metadata', async () => {
     const response = await app.inject({
       method: 'GET',
       url: '/api/oauth/providers',
@@ -62,14 +70,27 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      providers: [
+      providers: expect.arrayContaining([
         expect.objectContaining({
           provider: 'codex',
           platform: 'codex',
           enabled: true,
           loginType: 'oauth',
         }),
-      ],
+        expect.objectContaining({
+          provider: 'claude',
+          platform: 'claude',
+          enabled: true,
+          loginType: 'oauth',
+        }),
+        expect.objectContaining({
+          provider: 'gemini-cli',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+        }),
+      ]),
     });
   });
 
@@ -93,7 +114,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     expect(startBody.state).toMatch(/^[a-zA-Z0-9_-]{20,}$/);
     expect(startBody.authorizationUrl).toContain('https://auth.openai.com/oauth/authorize?');
     expect(startBody.authorizationUrl).toContain('client_id=');
-    expect(startBody.authorizationUrl).toContain(encodeURIComponent('http://localhost:1455/auth/callback'));
+    expect(startBody.authorizationUrl).toContain(encodeURIComponent('https://metapi.example/api/oauth/callback/codex'));
     expect(startBody.authorizationUrl).toContain(`state=${encodeURIComponent(startBody.state)}`);
     expect(startBody.authorizationUrl).toContain('code_challenge=');
 
@@ -107,6 +128,26 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       state: startBody.state,
       status: 'pending',
     });
+  });
+
+  it('keeps the codex loopback callback for local origins', async () => {
+    const startResponse = await app.inject({
+      method: 'POST',
+      url: '/api/oauth/providers/codex/start',
+      headers: {
+        host: 'localhost:4000',
+      },
+    });
+
+    expect(startResponse.statusCode).toBe(200);
+    const startBody = startResponse.json() as {
+      provider: string;
+      state: string;
+      authorizationUrl: string;
+    };
+    expect(startBody.provider).toBe('codex');
+    expect(startBody.authorizationUrl).toContain(encodeURIComponent('http://localhost:1455/auth/callback'));
+    expect(startBody.authorizationUrl).not.toContain(encodeURIComponent('http://localhost:4000/api/oauth/callback/codex'));
   });
 
   it('handles codex callback, creates oauth-backed account, and discovers plan models', async () => {
@@ -163,6 +204,9 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
     expect(callbackResponse.statusCode).toBe(200);
     expect(callbackResponse.body).toContain('window.close()');
+    expect(String(fetchMock.mock.calls[0]?.[1]?.body || '')).toContain(
+      'redirect_uri=https%3A%2F%2Fmetapi.example%2Fapi%2Foauth%2Fcallback%2Fcodex',
+    );
 
     const sessionResponse = await app.inject({
       method: 'GET',
@@ -284,7 +328,12 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       url: '/api/oauth/connections',
     });
     expect(connectionsResponse.statusCode).toBe(200);
-    expect(connectionsResponse.json()).toEqual({ items: [] });
+    expect(connectionsResponse.json()).toMatchObject({
+      items: [],
+      total: 0,
+      limit: 50,
+      offset: 0,
+    });
   });
 
   it('lists oauth connection health metadata and supports deleting the connection', async () => {
@@ -301,6 +350,8 @@ describe('oauth routes', { timeout: 15_000 }, () => {
       accessToken: 'oauth-access-token',
       apiToken: null,
       status: 'active',
+      oauthProvider: 'codex',
+      oauthAccountKey: 'chatgpt-account-123',
       extraConfig: JSON.stringify({
         credentialMode: 'session',
         oauth: {
@@ -342,8 +393,8 @@ describe('oauth routes', { timeout: 15_000 }, () => {
     });
 
     expect(listResponse.statusCode).toBe(200);
-    expect(listResponse.json()).toEqual({
-      items: [
+    expect(listResponse.json()).toMatchObject({
+      items: expect.arrayContaining([
         expect.objectContaining({
           accountId: account.id,
           provider: 'codex',
@@ -353,7 +404,10 @@ describe('oauth routes', { timeout: 15_000 }, () => {
           lastModelSyncAt: '2026-03-17T08:00:00.000Z',
           lastModelSyncError: 'Codex 模型获取失败（HTTP 403: forbidden）',
         }),
-      ],
+      ]),
+      total: 1,
+      limit: 50,
+      offset: 0,
     });
 
     const deleteResponse = await app.inject({

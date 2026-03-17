@@ -344,6 +344,7 @@ describe('sqlite migrate bootstrap', () => {
       '0010_proxy_logs_downstream_api_key',
       '0011_downstream_api_key_metadata',
       '0012_account_token_value_status',
+      '0013_oauth_multi_provider',
     ]);
     const appliedEntries = journalEntries.filter((entry) => !missingTags.has(entry.tag));
 

@@ -1,7 +1,11 @@
 import { BasePlatformAdapter, type BalanceInfo, type CheckinResult, type UserInfo } from './base.js';
 
 function normalizeBaseUrl(baseUrl: string): string {
-  return (baseUrl || '').replace(/\/+$/, '');
+  let normalized = (baseUrl || '').trim();
+  while (normalized.endsWith('/')) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized;
 }
 
 export class CodexAdapter extends BasePlatformAdapter {

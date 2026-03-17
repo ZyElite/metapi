@@ -252,6 +252,10 @@ export type OAuthProviderInfo = {
   platform: string;
   enabled: boolean;
   loginType: 'oauth';
+  requiresProjectId: boolean;
+  supportsDirectAccountRouting: boolean;
+  supportsCloudValidation: boolean;
+  supportsNativeProxy: boolean;
 };
 
 export type OAuthSessionInfo = {
@@ -271,6 +275,7 @@ export type OAuthConnectionInfo = {
   email?: string | null;
   accountKey?: string | null;
   planType?: string | null;
+  projectId?: string | null;
   modelCount: number;
   modelsPreview: string[];
   status: 'healthy' | 'abnormal';
@@ -278,6 +283,13 @@ export type OAuthConnectionInfo = {
   lastModelSyncAt?: string | null;
   lastModelSyncError?: string | null;
   site?: { id: number; name: string; url: string; platform: string } | null;
+};
+
+export type OAuthConnectionsResponse = {
+  items: OAuthConnectionInfo[];
+  total: number;
+  limit: number;
+  offset: number;
 };
 
 export const api = {
@@ -393,12 +405,13 @@ export const api = {
 
   // OAuth
   getOAuthProviders: () => request('/api/oauth/providers') as Promise<{ providers: OAuthProviderInfo[] }>,
-  startOAuthProvider: (provider: string, data?: { accountId?: number }) => request(`/api/oauth/providers/${encodeURIComponent(provider)}/start`, {
+  startOAuthProvider: (provider: string, data?: { accountId?: number; projectId?: string }) => request(`/api/oauth/providers/${encodeURIComponent(provider)}/start`, {
     method: 'POST',
     body: JSON.stringify(data || {}),
   }) as Promise<{ provider: string; state: string; authorizationUrl: string }>,
   getOAuthSession: (state: string) => request(`/api/oauth/sessions/${encodeURIComponent(state)}`) as Promise<OAuthSessionInfo>,
-  getOAuthConnections: () => request('/api/oauth/connections') as Promise<{ items: OAuthConnectionInfo[] }>,
+  getOAuthConnections: (params?: { limit?: number; offset?: number }) =>
+    request(`/api/oauth/connections${buildQueryString(params)}`) as Promise<OAuthConnectionsResponse>,
   rebindOAuthConnection: (accountId: number) => request(`/api/oauth/connections/${accountId}/rebind`, {
     method: 'POST',
     body: JSON.stringify({}),

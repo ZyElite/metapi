@@ -27,6 +27,7 @@ import {
   parseStoredUtcDateTime,
   toLocalDayKeyFromStoredUtc,
 } from '../../services/localTimeService.js';
+import { createRateLimitGuard } from '../../middleware/requestRateLimit.js';
 
 function parseBooleanFlag(raw?: string): boolean {
   if (!raw) return false;
@@ -36,6 +37,11 @@ function parseBooleanFlag(raw?: string): boolean {
 
 const MODELS_MARKETPLACE_BASE_TTL_MS = 15_000;
 const MODELS_MARKETPLACE_PRICING_TTL_MS = 90_000;
+const limitModelTokenCandidatesRead = createRateLimitGuard({
+  bucket: 'models-token-candidates-read',
+  max: 30,
+  windowMs: 60_000,
+});
 
 type ModelsMarketplaceCacheEntry = {
   expiresAt: number;
@@ -970,7 +976,7 @@ export async function statsRoutes(app: FastifyInstance) {
     };
   });
 
-  app.get('/api/models/token-candidates', async () => {
+  app.get('/api/models/token-candidates', { preHandler: [limitModelTokenCandidatesRead] }, async () => {
     const resolveTokenGroupLabel = (tokenGroup: string | null, tokenName: string | null): string | null => {
       const explicit = (tokenGroup || '').trim();
       if (explicit) return explicit;

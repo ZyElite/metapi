@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { ToastProvider } from '../components/Toast.js';
 import OAuthManagement from './OAuthManagement.js';
 
-const { apiMock, openMock, focusMock, confirmMock } = vi.hoisted(() => ({
+const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() => ({
   apiMock: {
     getOAuthProviders: vi.fn(),
     getOAuthConnections: vi.fn(),
@@ -16,6 +16,7 @@ const { apiMock, openMock, focusMock, confirmMock } = vi.hoisted(() => ({
   openMock: vi.fn(),
   focusMock: vi.fn(),
   confirmMock: vi.fn(),
+  promptMock: vi.fn(),
 }));
 
 vi.mock('../api.js', () => ({
@@ -41,11 +42,14 @@ describe('OAuthManagement page', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    Object.values(apiMock).forEach((mock) => mock.mockReset());
     openMock.mockReturnValue({ focus: focusMock });
     confirmMock.mockReturnValue(true);
+    promptMock.mockReturnValue('project-demo');
     vi.stubGlobal('window', {
       open: openMock,
       confirm: confirmMock,
+      prompt: promptMock,
       setTimeout,
       clearTimeout,
     } as unknown as Window & typeof globalThis);
@@ -60,7 +64,28 @@ describe('OAuthManagement page', () => {
   it('renders available oauth providers and existing oauth connections', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [
-        { provider: 'codex', label: 'Codex', platform: 'codex', enabled: true, loginType: 'oauth' },
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+        {
+          provider: 'gemini-cli',
+          label: 'Gemini CLI',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
       ],
     });
     apiMock.getOAuthConnections.mockResolvedValue({
@@ -72,9 +97,12 @@ describe('OAuthManagement page', () => {
           planType: 'plus',
           modelCount: 3,
           modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
-          status: 'active',
+          status: 'healthy',
         },
       ],
+      total: 1,
+      limit: 100,
+      offset: 0,
     });
 
     let root: ReturnType<typeof create> | null = null;
@@ -88,14 +116,16 @@ describe('OAuthManagement page', () => {
           </ToastProvider>,
         );
       });
-      await flushMicrotasks();
-
-      const text = collectText(root!.root);
-      expect(text).toContain('OAuth 管理');
-      expect(text).toContain('Codex');
-      expect(text).toContain('codex-user@example.com');
-      expect(text).toContain('plus');
-      expect(text).toContain('3 个模型');
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root!.root);
+        expect(text).toContain('OAuth 管理');
+        expect(text).toContain('Codex');
+        expect(text).toContain('Gemini CLI');
+        expect(text).toContain('codex-user@example.com');
+        expect(text).toContain('plus');
+        expect(text).toContain('3 个模型');
+      });
     } finally {
       root?.unmount();
     }
@@ -104,11 +134,32 @@ describe('OAuthManagement page', () => {
   it('starts oauth, opens popup, polls status, and refreshes connection list after success', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [
-        { provider: 'codex', label: 'Codex', platform: 'codex', enabled: true, loginType: 'oauth' },
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+        {
+          provider: 'gemini-cli',
+          label: 'Gemini CLI',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
       ],
     });
     apiMock.getOAuthConnections
-      .mockResolvedValueOnce({ items: [] })
+      .mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 })
       .mockResolvedValueOnce({
         items: [
           {
@@ -118,9 +169,12 @@ describe('OAuthManagement page', () => {
             planType: 'plus',
             modelCount: 3,
             modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
-            status: 'active',
+            status: 'healthy',
           },
         ],
+        total: 1,
+        limit: 100,
+        offset: 0,
       });
     apiMock.startOAuthProvider.mockResolvedValue({
       provider: 'codex',
@@ -151,7 +205,9 @@ describe('OAuthManagement page', () => {
           </ToastProvider>,
         );
       });
-      await flushMicrotasks();
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
 
       const startButton = root!.root.find((node) => (
         node.type === 'button'
@@ -162,9 +218,11 @@ describe('OAuthManagement page', () => {
       await act(async () => {
         await startButton.props.onClick();
       });
-      await flushMicrotasks();
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
 
-      expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex');
+      expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', { projectId: undefined });
       expect(openMock).toHaveBeenCalledWith(
         'https://auth.openai.com/oauth/authorize?state=oauth-state-123',
         'oauth-codex',
@@ -174,12 +232,16 @@ describe('OAuthManagement page', () => {
       await act(async () => {
         vi.advanceTimersByTime(1600);
       });
-      await flushMicrotasks();
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
 
       await act(async () => {
         vi.advanceTimersByTime(1600);
       });
-      await flushMicrotasks();
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
 
       expect(apiMock.getOAuthSession).toHaveBeenCalledWith('oauth-state-123');
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
@@ -194,7 +256,17 @@ describe('OAuthManagement page', () => {
   it('shows oauth connection status metadata and allows deleting a connection', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [
-        { provider: 'codex', label: 'Codex', platform: 'codex', enabled: true, loginType: 'oauth' },
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
       ],
     });
     apiMock.getOAuthConnections
@@ -213,8 +285,11 @@ describe('OAuthManagement page', () => {
             lastModelSyncError: 'Codex 模型获取失败（HTTP 403: forbidden）',
           },
         ],
+        total: 1,
+        limit: 100,
+        offset: 0,
       })
-      .mockResolvedValueOnce({ items: [] });
+      .mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 });
     apiMock.deleteOAuthConnection.mockResolvedValue({ success: true });
 
     let root: ReturnType<typeof create> | null = null;
@@ -228,12 +303,13 @@ describe('OAuthManagement page', () => {
           </ToastProvider>,
         );
       });
-      await flushMicrotasks();
-
-      const text = collectText(root!.root);
-      expect(text).toContain('异常');
-      expect(text).toContain('1 条路由');
-      expect(text).toContain('Codex 模型获取失败');
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root!.root);
+        expect(text).toContain('异常');
+        expect(text).toContain('1 条路由');
+        expect(text).toContain('Codex 模型获取失败');
+      });
 
       const deleteButton = root!.root.find((node) => (
         node.type === 'button'
@@ -244,7 +320,9 @@ describe('OAuthManagement page', () => {
       await act(async () => {
         await deleteButton.props.onClick();
       });
-      await flushMicrotasks();
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+      });
 
       expect(confirmMock).toHaveBeenCalled();
       expect(apiMock.deleteOAuthConnection).toHaveBeenCalledWith(7);

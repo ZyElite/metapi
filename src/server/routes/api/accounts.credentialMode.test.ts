@@ -172,7 +172,7 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
     });
   });
 
-  it('marks codex oauth connection as proxy-capable but not checkin/balance-capable', async () => {
+  it('marks codex oauth connection as direct-routed proxy-only connection without checkin/balance capabilities', async () => {
     const site = await db.insert(schema.sites).values({
       name: 'Codex Site',
       url: 'https://chatgpt.com/backend-api/codex',
@@ -221,12 +221,12 @@ describe('accounts credential mode', { timeout: 15_000 }, () => {
     }>;
     const item = list.find((entry) => entry.id === account.id);
     expect(item?.credentialMode).toBe('session');
-    expect(item?.capabilities).toMatchObject({
-      canCheckin: false,
-      canRefreshBalance: false,
-      proxyOnly: false,
+      expect(item?.capabilities).toMatchObject({
+        canCheckin: false,
+        canRefreshBalance: false,
+        proxyOnly: true,
+      });
     });
-  });
 
   it('stores managed refresh token for sub2api session account', async () => {
     verifyTokenMock.mockResolvedValueOnce({

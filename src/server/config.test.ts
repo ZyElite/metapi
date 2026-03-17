@@ -38,6 +38,16 @@ describe('buildConfig', () => {
     expect(config.telegramApiBaseUrl).toBe('https://api.telegram.org');
   });
 
+  it('does not embed OAuth client credentials by default', () => {
+    const config = buildConfig({});
+
+    expect(config.codexClientId).toBe('');
+    expect(config.claudeClientId).toBe('');
+    expect(config.claudeClientSecret).toBe('');
+    expect(config.geminiCliClientId).toBe('');
+    expect(config.geminiCliClientSecret).toBe('');
+  });
+
   it('accepts JSON request bodies larger than Fastify default 1 MiB', async () => {
     const app = Fastify(buildFastifyOptions(buildConfig({})));
     const largeText = 'a'.repeat(2 * 1024 * 1024);

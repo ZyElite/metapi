@@ -1,44 +1,23 @@
-import { eq } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { db, schema } from '../../db/index.js';
 import { mergeAccountExtraConfig } from '../accountExtraConfig.js';
 import { refreshModelsForAccount, rebuildTokenRoutesFromAvailability } from '../modelService.js';
-import {
-  buildCodexAuthorizationUrl,
-  CODEX_LOOPBACK_REDIRECT_URI,
-  CODEX_OAUTH_PROVIDER,
-  CODEX_UPSTREAM_BASE_URL,
-  exchangeCodexAuthorizationCode,
-  refreshCodexTokens,
-  type CodexTokenExchangeResult,
-} from './codexProvider.js';
 import {
   createOauthSession,
   getOauthSession,
   markOauthSessionError,
   markOauthSessionSuccess,
 } from './sessionStore.js';
-import { getCodexOauthInfoFromExtraConfig } from './codexAccount.js';
-import { getCodexLoopbackCallbackServerState } from './localCallbackServer.js';
+import { getOAuthLoopbackCallbackServerState } from './localCallbackServer.js';
+import {
+  getOAuthProviderDefinition,
+  listOAuthProviderDefinitions,
+  type OAuthProviderDefinition,
+} from './providers.js';
+import { buildOauthInfo, getOauthInfoFromExtraConfig } from './oauthAccount.js';
+import { buildCodexOauthInfo } from './codexAccount.js';
 
-type OAuthProviderMetadata = {
-  provider: string;
-  label: string;
-  platform: string;
-  enabled: boolean;
-  loginType: 'oauth';
-};
-
-const OAUTH_PROVIDER_LIST: OAuthProviderMetadata[] = [
-  {
-    provider: CODEX_OAUTH_PROVIDER,
-    label: 'Codex',
-    platform: 'codex',
-    enabled: true,
-    loginType: 'oauth',
-  },
-];
-
-const CODEX_SITE_NAME = 'ChatGPT Codex OAuth';
+type OAuthProviderMetadata = ReturnType<typeof listOauthProviders>[number];
 
 function asNonEmptyString(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
@@ -46,54 +25,39 @@ function asNonEmptyString(value: unknown): string | undefined {
   return trimmed || undefined;
 }
 
-function getHeaderValue(headers: Record<string, unknown> | undefined, key: string): string | undefined {
-  if (!headers) return undefined;
-  const loweredKey = key.toLowerCase();
-  for (const [rawKey, rawValue] of Object.entries(headers)) {
-    if (rawKey.toLowerCase() !== loweredKey) continue;
-    if (typeof rawValue === 'string') {
-      const trimmed = rawValue.trim();
-      if (trimmed) return trimmed;
-    }
-    if (Array.isArray(rawValue)) {
-      for (const item of rawValue) {
-        if (typeof item !== 'string') continue;
-        const trimmed = item.trim();
-        if (trimmed) return trimmed;
-      }
-    }
-  }
-  return undefined;
-}
-
-function buildUsername(exchange: CodexTokenExchangeResult): string {
-  return exchange.email || exchange.accountId || 'codex-user';
+function buildUsername(input: {
+  email?: string;
+  accountKey?: string;
+  provider: string;
+}) {
+  return input.email || input.accountKey || `${input.provider}-user`;
 }
 
 async function getNextAccountSortOrder(): Promise<number> {
-  const rows = await db.select({ sortOrder: schema.accounts.sortOrder }).from(schema.accounts).all();
-  const max = rows.reduce((currentMax, row) => Math.max(currentMax, row.sortOrder || 0), -1);
-  return max + 1;
+  const row = await db.select({
+    maxSortOrder: sql<number>`COALESCE(MAX(${schema.accounts.sortOrder}), -1)`,
+  }).from(schema.accounts).get();
+  return (row?.maxSortOrder ?? -1) + 1;
 }
 
 async function getNextSiteSortOrder(): Promise<number> {
-  const rows = await db.select({ sortOrder: schema.sites.sortOrder }).from(schema.sites).all();
-  const max = rows.reduce((currentMax, row) => Math.max(currentMax, row.sortOrder || 0), -1);
-  return max + 1;
+  const row = await db.select({
+    maxSortOrder: sql<number>`COALESCE(MAX(${schema.sites.sortOrder}), -1)`,
+  }).from(schema.sites).get();
+  return (row?.maxSortOrder ?? -1) + 1;
 }
 
-async function ensureCodexSite() {
-  const sites = await db.select().from(schema.sites).all();
-  const existing = sites.find((site) => (
-    String(site.platform || '').trim().toLowerCase() === 'codex'
-    && String(site.url || '').trim() === CODEX_UPSTREAM_BASE_URL
-  ));
+async function ensureOauthSite(definition: OAuthProviderDefinition) {
+  const existing = await db.select().from(schema.sites).where(and(
+    eq(schema.sites.platform, definition.site.platform),
+    eq(schema.sites.url, definition.site.url),
+  )).get();
   if (existing) return existing;
 
   return db.insert(schema.sites).values({
-    name: CODEX_SITE_NAME,
-    url: CODEX_UPSTREAM_BASE_URL,
-    platform: 'codex',
+    name: definition.site.name,
+    url: definition.site.url,
+    platform: definition.site.platform,
     status: 'active',
     useSystemProxy: false,
     isPinned: false,
@@ -102,55 +66,102 @@ async function ensureCodexSite() {
   }).returning().get();
 }
 
-function matchesCodexIdentity(
-  account: typeof schema.accounts.$inferSelect,
-  exchange: CodexTokenExchangeResult,
-): boolean {
-  const oauth = getCodexOauthInfoFromExtraConfig(account.extraConfig);
-  if (!oauth || oauth.provider !== CODEX_OAUTH_PROVIDER) return false;
-  if (oauth.accountId && exchange.accountId) return oauth.accountId === exchange.accountId;
-  if (oauth.email && exchange.email) return oauth.email === exchange.email;
-  const username = asNonEmptyString(account.username);
-  if (username && exchange.email) return username === exchange.email;
-  return false;
-}
-
-async function findExistingCodexAccount(exchange: CodexTokenExchangeResult, rebindAccountId?: number) {
-  if (typeof rebindAccountId === 'number' && rebindAccountId > 0) {
+async function findExistingOauthAccount(input: {
+  provider: string;
+  accountKey?: string;
+  email?: string;
+  projectId?: string;
+  rebindAccountId?: number;
+}) {
+  if (typeof input.rebindAccountId === 'number' && input.rebindAccountId > 0) {
     return db.select().from(schema.accounts)
-      .where(eq(schema.accounts.id, rebindAccountId))
+      .where(eq(schema.accounts.id, input.rebindAccountId))
       .get();
   }
 
-  const accounts = await db.select().from(schema.accounts).all();
-  return accounts.find((account) => matchesCodexIdentity(account, exchange)) || null;
+  const accountKey = asNonEmptyString(input.accountKey);
+  const email = asNonEmptyString(input.email);
+  const projectId = asNonEmptyString(input.projectId);
+
+  if (accountKey) {
+    const byKey = await db.select().from(schema.accounts).where(and(
+      eq(schema.accounts.oauthProvider, input.provider),
+      eq(schema.accounts.oauthAccountKey, accountKey),
+      projectId
+        ? eq(schema.accounts.oauthProjectId, projectId)
+        : or(isNull(schema.accounts.oauthProjectId), eq(schema.accounts.oauthProjectId, '')),
+    )).get();
+    if (byKey) return byKey;
+  }
+
+  if (email) {
+    const byEmail = await db.select().from(schema.accounts).where(and(
+      eq(schema.accounts.oauthProvider, input.provider),
+      eq(schema.accounts.username, email),
+    )).get();
+    if (byEmail) return byEmail;
+  }
+
+  return null;
 }
 
-async function upsertCodexAccount(exchange: CodexTokenExchangeResult, rebindAccountId?: number) {
-  const site = await ensureCodexSite();
-  const existing = await findExistingCodexAccount(exchange, rebindAccountId);
-  const username = buildUsername(exchange);
+async function upsertOauthAccount(input: {
+  definition: OAuthProviderDefinition;
+  exchange: {
+    accessToken: string;
+    refreshToken?: string;
+    tokenExpiresAt?: number;
+    email?: string;
+    accountKey?: string;
+    accountId?: string;
+    planType?: string;
+    projectId?: string;
+    idToken?: string;
+    providerData?: Record<string, unknown>;
+  };
+  rebindAccountId?: number;
+}) {
+  const site = await ensureOauthSite(input.definition);
+  const existing = await findExistingOauthAccount({
+    provider: input.definition.metadata.provider,
+    accountKey: input.exchange.accountKey || input.exchange.accountId,
+    email: input.exchange.email,
+    projectId: input.exchange.projectId,
+    rebindAccountId: input.rebindAccountId,
+  });
+  const username = buildUsername({
+    email: input.exchange.email,
+    accountKey: input.exchange.accountKey || input.exchange.accountId,
+    provider: input.definition.metadata.provider,
+  });
+  const oauth = buildOauthInfo(existing?.extraConfig, {
+    provider: input.definition.metadata.provider,
+    accountId: input.exchange.accountId || input.exchange.accountKey,
+    accountKey: input.exchange.accountKey || input.exchange.accountId,
+    email: input.exchange.email,
+    planType: input.exchange.planType,
+    projectId: input.exchange.projectId,
+    refreshToken: input.exchange.refreshToken,
+    tokenExpiresAt: input.exchange.tokenExpiresAt,
+    idToken: input.exchange.idToken,
+    providerData: input.exchange.providerData,
+  });
   const extraConfig = mergeAccountExtraConfig(existing?.extraConfig, {
     credentialMode: 'session',
-    oauth: {
-      provider: CODEX_OAUTH_PROVIDER,
-      accountId: exchange.accountId,
-      email: exchange.email,
-      planType: exchange.planType,
-      refreshToken: exchange.refreshToken,
-      idToken: exchange.idToken,
-      tokenExpiresAt: exchange.tokenExpiresAt,
-    },
+    oauth,
   });
 
   if (existing) {
     await db.update(schema.accounts).set({
       siteId: site.id,
       username,
-      accessToken: exchange.accessToken,
+      accessToken: input.exchange.accessToken,
       apiToken: null,
       checkinEnabled: false,
       status: 'active',
+      oauthProvider: input.definition.metadata.provider,
+      oauthAccountKey: oauth.accountKey || oauth.accountId || null,
+      oauthProjectId: oauth.projectId || null,
       extraConfig,
       updatedAt: new Date().toISOString(),
     }).where(eq(schema.accounts.id, existing.id)).run();
@@ -164,10 +175,13 @@ async function upsertCodexAccount(exchange: CodexTokenExchangeResult, rebindAcco
   const created = await db.insert(schema.accounts).values({
     siteId: site.id,
     username,
-    accessToken: exchange.accessToken,
+    accessToken: input.exchange.accessToken,
     apiToken: null,
     checkinEnabled: false,
     status: 'active',
+    oauthProvider: input.definition.metadata.provider,
+    oauthAccountKey: oauth.accountKey || oauth.accountId || null,
+    oauthProjectId: oauth.projectId || null,
     extraConfig,
     isPinned: false,
     sortOrder: await getNextAccountSortOrder(),
@@ -176,34 +190,47 @@ async function upsertCodexAccount(exchange: CodexTokenExchangeResult, rebindAcco
 }
 
 export function listOauthProviders() {
-  return OAUTH_PROVIDER_LIST;
+  return listOAuthProviderDefinitions().map((definition) => {
+    const state = getOAuthLoopbackCallbackServerState(definition.metadata.provider);
+    return {
+      ...definition.metadata,
+      enabled: state.ready || !state.attempted,
+    };
+  });
 }
 
-export function startOauthProviderFlow(input: {
+export async function startOauthProviderFlow(input: {
   provider: string;
-  redirectOrigin: string;
   rebindAccountId?: number;
+  projectId?: string;
+  requestOrigin?: string;
 }) {
-  if (input.provider !== CODEX_OAUTH_PROVIDER) {
+  const definition = getOAuthProviderDefinition(input.provider);
+  if (!definition) {
     throw new Error(`unsupported oauth provider: ${input.provider}`);
   }
-  const callbackServerState = getCodexLoopbackCallbackServerState();
-  if (callbackServerState.attempted && !callbackServerState.ready) {
-    throw new Error(`codex oauth callback listener is unavailable: ${callbackServerState.error || 'unknown error'}`);
+  const redirectUri = definition.resolveRedirectUri?.({
+    requestOrigin: input.requestOrigin,
+  }) || definition.loopback.redirectUri;
+  const callbackServerState = getOAuthLoopbackCallbackServerState(input.provider);
+  const usesLoopbackCallback = redirectUri === definition.loopback.redirectUri;
+  if (usesLoopbackCallback && callbackServerState.attempted && !callbackServerState.ready) {
+    throw new Error(`${input.provider} oauth callback listener is unavailable: ${callbackServerState.error || 'unknown error'}`);
   }
-  const redirectUri = CODEX_LOOPBACK_REDIRECT_URI;
   const session = createOauthSession({
     provider: input.provider,
     redirectUri,
     rebindAccountId: input.rebindAccountId,
+    projectId: input.projectId,
   });
   return {
     provider: input.provider,
     state: session.state,
-    authorizationUrl: buildCodexAuthorizationUrl({
+    authorizationUrl: await definition.buildAuthorizationUrl({
       state: session.state,
-      redirectUri,
+      redirectUri: session.redirectUri,
       codeVerifier: session.codeVerifier,
+      projectId: session.projectId,
     }),
   };
 }
@@ -233,6 +260,11 @@ export async function handleOauthCallback(input: {
   if (!session || session.provider !== input.provider) {
     throw new Error('oauth session not found or provider mismatch');
   }
+  const definition = getOAuthProviderDefinition(input.provider);
+  if (!definition) {
+    markOauthSessionError(input.state, `unsupported oauth provider: ${input.provider}`);
+    throw new Error(`unsupported oauth provider: ${input.provider}`);
+  }
   if (input.error) {
     markOauthSessionError(input.state, input.error);
     throw new Error(input.error);
@@ -243,12 +275,18 @@ export async function handleOauthCallback(input: {
     throw new Error('missing oauth code');
   }
 
-  const exchange = await exchangeCodexAuthorizationCode({
+  const exchange = await definition.exchangeAuthorizationCode({
     code,
-    codeVerifier: session.codeVerifier,
+    state: input.state,
     redirectUri: session.redirectUri,
+    codeVerifier: session.codeVerifier,
+    projectId: session.projectId,
   });
-  const { account, site, created } = await upsertCodexAccount(exchange, session.rebindAccountId) as Awaited<ReturnType<typeof upsertCodexAccount>> & { created: boolean };
+  const { account, site, created } = await upsertOauthAccount({
+    definition,
+    exchange,
+    rebindAccountId: session.rebindAccountId,
+  });
   if (!account) {
     markOauthSessionError(input.state, 'failed to persist oauth account');
     throw new Error('failed to persist oauth account');
@@ -260,7 +298,7 @@ export async function handleOauthCallback(input: {
       await db.delete(schema.accounts).where(eq(schema.accounts.id, account.id)).run();
     }
     await rebuildTokenRoutesFromAvailability();
-    const errorMessage = refreshResult.errorMessage || 'codex model discovery failed';
+    const errorMessage = refreshResult.errorMessage || `${input.provider} model discovery failed`;
     markOauthSessionError(input.state, errorMessage);
     throw new Error(errorMessage);
   }
@@ -273,15 +311,41 @@ export async function handleOauthCallback(input: {
   return { accountId: account.id, siteId: site.id };
 }
 
-export async function listOauthConnections() {
+export async function listOauthConnections(options: {
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const limit = Math.max(1, Math.min(200, Math.trunc(options.limit ?? 50)));
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0));
+
+  const totalRow = await db.select({
+    count: sql<number>`COUNT(*)`,
+  }).from(schema.accounts)
+    .where(sql`${schema.accounts.oauthProvider} IS NOT NULL`)
+    .get();
+  const total = totalRow?.count ?? 0;
+
   const rows = await db.select().from(schema.accounts)
     .innerJoin(schema.sites, eq(schema.accounts.siteId, schema.sites.id))
+    .where(sql`${schema.accounts.oauthProvider} IS NOT NULL`)
+    .orderBy(desc(schema.accounts.id))
+    .limit(limit)
+    .offset(offset)
     .all();
+
+  const accountIds = rows.map((row) => row.accounts.id);
+  if (accountIds.length <= 0) {
+    return { items: [], total, limit, offset };
+  }
+
   const modelRows = await db.select({
     accountId: schema.modelAvailability.accountId,
     modelName: schema.modelAvailability.modelName,
   }).from(schema.modelAvailability)
-    .where(eq(schema.modelAvailability.available, true))
+    .where(and(
+      inArray(schema.modelAvailability.accountId, accountIds),
+      eq(schema.modelAvailability.available, true),
+    ))
     .all();
   const modelMap = new Map<number, string[]>();
   for (const row of modelRows) {
@@ -290,47 +354,52 @@ export async function listOauthConnections() {
     list.push(row.modelName);
     modelMap.set(row.accountId, list);
   }
+
   const routeChannelRows = await db.select({
     accountId: schema.routeChannels.accountId,
-  }).from(schema.routeChannels).all();
+    count: sql<number>`COUNT(*)`,
+  }).from(schema.routeChannels)
+    .where(inArray(schema.routeChannels.accountId, accountIds))
+    .groupBy(schema.routeChannels.accountId)
+    .all();
   const routeChannelCountByAccount = new Map<number, number>();
   for (const row of routeChannelRows) {
-    const current = routeChannelCountByAccount.get(row.accountId) || 0;
-    routeChannelCountByAccount.set(row.accountId, current + 1);
+    routeChannelCountByAccount.set(row.accountId, row.count ?? 0);
   }
 
-  return rows
-    .filter((row) => getCodexOauthInfoFromExtraConfig(row.accounts.extraConfig)?.provider === CODEX_OAUTH_PROVIDER)
-    .map((row) => {
-      const oauth = getCodexOauthInfoFromExtraConfig(row.accounts.extraConfig)!;
-      const models = modelMap.get(row.accounts.id) || [];
-      const status = (
-        oauth.modelDiscoveryStatus === 'abnormal'
-        || row.accounts.status !== 'active'
-        || row.sites.status !== 'active'
-      ) ? 'abnormal' : 'healthy';
-      return {
-        accountId: row.accounts.id,
-        siteId: row.sites.id,
-        provider: CODEX_OAUTH_PROVIDER,
-        username: row.accounts.username,
-        email: oauth.email,
-        accountKey: oauth.accountId,
-        planType: oauth.planType,
-        modelCount: models.length,
-        modelsPreview: models.slice(0, 10),
-        status,
-        routeChannelCount: routeChannelCountByAccount.get(row.accounts.id) || 0,
-        lastModelSyncAt: oauth.lastModelSyncAt,
-        lastModelSyncError: oauth.lastModelSyncError,
-        site: {
-          id: row.sites.id,
-          name: row.sites.name,
-          url: row.sites.url,
-          platform: row.sites.platform,
-        },
-      };
-    });
+  const items = rows.map((row) => {
+    const oauth = getOauthInfoFromExtraConfig(row.accounts.extraConfig)!;
+    const models = modelMap.get(row.accounts.id) || [];
+    const status = (
+      oauth.modelDiscoveryStatus === 'abnormal'
+      || row.accounts.status !== 'active'
+      || row.sites.status !== 'active'
+    ) ? 'abnormal' : 'healthy';
+    return {
+      accountId: row.accounts.id,
+      siteId: row.sites.id,
+      provider: oauth.provider,
+      username: row.accounts.username,
+      email: oauth.email,
+      accountKey: oauth.accountKey || oauth.accountId,
+      planType: oauth.planType,
+      projectId: oauth.projectId,
+      modelCount: models.length,
+      modelsPreview: models.slice(0, 10),
+      status,
+      routeChannelCount: routeChannelCountByAccount.get(row.accounts.id) || 0,
+      lastModelSyncAt: oauth.lastModelSyncAt,
+      lastModelSyncError: oauth.lastModelSyncError,
+      site: {
+        id: row.sites.id,
+        name: row.sites.name,
+        url: row.sites.url,
+        platform: row.sites.platform,
+      },
+    };
+  });
+
+  return { items, total, limit, offset };
 }
 
 export async function deleteOauthConnection(accountId: number) {
@@ -340,7 +409,7 @@ export async function deleteOauthConnection(accountId: number) {
   if (!account) {
     throw new Error('oauth account not found');
   }
-  const oauth = getCodexOauthInfoFromExtraConfig(account.extraConfig);
+  const oauth = getOauthInfoFromExtraConfig(account.extraConfig);
   if (!oauth) {
     throw new Error('account is not managed by oauth');
   }
@@ -349,21 +418,36 @@ export async function deleteOauthConnection(accountId: number) {
   return { success: true };
 }
 
-export async function startOauthRebindFlow(accountId: number, redirectOrigin: string) {
+export async function startOauthRebindFlow(accountId: number, requestOrigin?: string) {
   const account = await db.select().from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
   if (!account) {
     throw new Error('oauth account not found');
   }
-  const oauth = getCodexOauthInfoFromExtraConfig(account.extraConfig);
+  const oauth = getOauthInfoFromExtraConfig(account.extraConfig);
   if (!oauth) {
     throw new Error('account is not managed by oauth');
   }
   return startOauthProviderFlow({
     provider: oauth.provider,
-    redirectOrigin,
     rebindAccountId: accountId,
+    projectId: oauth.projectId,
+    requestOrigin,
+  });
+}
+
+export function buildOauthProviderHeaders(input: {
+  extraConfig?: string | null;
+  downstreamHeaders?: Record<string, unknown>;
+}) {
+  const oauth = getOauthInfoFromExtraConfig(input.extraConfig);
+  if (!oauth) return {};
+  const definition = getOAuthProviderDefinition(oauth.provider);
+  if (!definition?.buildProxyHeaders) return {};
+  return definition.buildProxyHeaders({
+    oauth,
+    downstreamHeaders: input.downstreamHeaders,
   });
 }
 
@@ -371,48 +455,62 @@ export function buildCodexOauthProviderHeaders(input: {
   extraConfig?: string | null;
   downstreamHeaders?: Record<string, unknown>;
 }) {
-  const oauth = getCodexOauthInfoFromExtraConfig(input.extraConfig);
-  if (!oauth) return {};
-
-  const accountId = getHeaderValue(input.downstreamHeaders, 'chatgpt-account-id') || oauth.accountId;
-  const originator = getHeaderValue(input.downstreamHeaders, 'originator') || 'codex_cli_rs';
-  const headers: Record<string, string> = {
-    Originator: originator,
-  };
-  if (accountId) {
-    headers['Chatgpt-Account-Id'] = accountId;
-  }
-  return headers;
+  const oauth = buildCodexOauthInfo(input.extraConfig);
+  const definition = getOAuthProviderDefinition('codex');
+  return definition?.buildProxyHeaders?.({
+    oauth,
+    downstreamHeaders: input.downstreamHeaders,
+  }) || {};
 }
 
-export async function refreshCodexOauthAccessToken(accountId: number) {
+export async function refreshOauthAccessToken(accountId: number) {
   const account = await db.select().from(schema.accounts)
     .where(eq(schema.accounts.id, accountId))
     .get();
   if (!account) {
-    throw new Error('codex oauth account not found');
+    throw new Error('oauth account not found');
   }
-  const oauth = getCodexOauthInfoFromExtraConfig(account.extraConfig);
+  const oauth = getOauthInfoFromExtraConfig(account.extraConfig);
   if (!oauth?.refreshToken) {
-    throw new Error('codex oauth refresh token missing');
+    throw new Error('oauth refresh token missing');
+  }
+  const definition = getOAuthProviderDefinition(oauth.provider);
+  if (!definition) {
+    throw new Error(`unsupported oauth provider: ${oauth.provider}`);
   }
 
-  const refreshed = await refreshCodexTokens(oauth.refreshToken);
+  const refreshed = await definition.refreshAccessToken({
+    refreshToken: oauth.refreshToken,
+    oauth: {
+      projectId: oauth.projectId,
+      providerData: oauth.providerData,
+    },
+  });
+  const nextOauth = buildOauthInfo(account.extraConfig, {
+    provider: oauth.provider,
+    accountId: refreshed.accountId || oauth.accountId,
+    accountKey: refreshed.accountKey || oauth.accountKey || refreshed.accountId || oauth.accountId,
+    email: refreshed.email || oauth.email,
+    planType: refreshed.planType || oauth.planType,
+    projectId: refreshed.projectId || oauth.projectId,
+    refreshToken: refreshed.refreshToken || oauth.refreshToken,
+    tokenExpiresAt: refreshed.tokenExpiresAt || oauth.tokenExpiresAt,
+    idToken: refreshed.idToken || oauth.idToken,
+    providerData: {
+      ...(oauth.providerData || {}),
+      ...(refreshed.providerData || {}),
+    },
+  });
   const extraConfig = mergeAccountExtraConfig(account.extraConfig, {
     credentialMode: 'session',
-    oauth: {
-      provider: CODEX_OAUTH_PROVIDER,
-      accountId: refreshed.accountId || oauth.accountId,
-      email: refreshed.email || oauth.email,
-      planType: refreshed.planType || oauth.planType,
-      refreshToken: refreshed.refreshToken,
-      idToken: refreshed.idToken,
-      tokenExpiresAt: refreshed.tokenExpiresAt,
-    },
+    oauth: nextOauth,
   });
 
   await db.update(schema.accounts).set({
     accessToken: refreshed.accessToken,
+    oauthProvider: oauth.provider,
+    oauthAccountKey: nextOauth.accountKey || nextOauth.accountId || null,
+    oauthProjectId: nextOauth.projectId || null,
     extraConfig,
     status: 'active',
     updatedAt: new Date().toISOString(),
@@ -421,7 +519,13 @@ export async function refreshCodexOauthAccessToken(accountId: number) {
   return {
     accountId,
     accessToken: refreshed.accessToken,
-    accountKey: refreshed.accountId || oauth.accountId,
+    accountKey: nextOauth.accountKey || nextOauth.accountId,
     extraConfig,
   };
 }
+
+export async function refreshCodexOauthAccessToken(accountId: number) {
+  return refreshOauthAccessToken(accountId);
+}
+
+export type { OAuthProviderMetadata };

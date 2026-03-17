@@ -10,7 +10,7 @@ import {
 } from './routeRoutingStrategy.js';
 import { type DownstreamRoutingPolicy, EMPTY_DOWNSTREAM_ROUTING_POLICY } from './downstreamPolicyTypes.js';
 import { isUsableAccountToken } from './accountTokenService.js';
-import { isCodexPlatform } from './oauth/codexAccount.js';
+import { getOauthInfoFromExtraConfig } from './oauth/oauthAccount.js';
 
 interface RouteMatch {
   route: typeof schema.tokenRoutes.$inferSelect;
@@ -1045,7 +1045,7 @@ export class TokenRouter {
     const fallback = candidate.account.apiToken?.trim();
     if (fallback) return fallback;
 
-    if ((candidate.site?.platform || '').trim().toLowerCase() === 'codex' || isCodexPlatform(candidate.account)) {
+    if (getOauthInfoFromExtraConfig(candidate.account.extraConfig)) {
       const accessToken = candidate.account.accessToken?.trim();
       return accessToken || null;
     }

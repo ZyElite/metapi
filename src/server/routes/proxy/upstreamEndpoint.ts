@@ -8,6 +8,10 @@ import {
   convertOpenAiBodyToAnthropicMessagesBody,
   sanitizeAnthropicMessagesBody,
 } from '../../transformers/anthropic/messages/conversion.js';
+import {
+  buildGeminiGenerateContentRequestFromOpenAi,
+  wrapGeminiCliRequest,
+} from './geminiCliCompat.js';
 export {
   buildMinimalJsonHeadersForCompatibility,
   isEndpointDispatchDeniedError,
@@ -198,6 +202,72 @@ function ensureCodexResponsesInstructions(
   };
 }
 
+function ensureCodexResponsesStoreFalse(
+  body: Record<string, unknown>,
+  sitePlatform: string,
+): Record<string, unknown> {
+  if (sitePlatform !== 'codex') return body;
+  if (body.store === false) return body;
+  return {
+    ...body,
+    store: false,
+  };
+}
+
+function convertCodexSystemRoleToDeveloper(input: unknown): unknown {
+  if (!Array.isArray(input)) return input;
+  return input.map((item) => {
+    if (!isRecord(item)) return item;
+    if (asTrimmedString(item.type).toLowerCase() !== 'message') return item;
+    if (asTrimmedString(item.role).toLowerCase() !== 'system') return item;
+    return {
+      ...item,
+      role: 'developer',
+    };
+  });
+}
+
+function applyCodexResponsesCompatibility(
+  body: Record<string, unknown>,
+  sitePlatform: string,
+): Record<string, unknown> {
+  if (sitePlatform !== 'codex') return body;
+
+  const next: Record<string, unknown> = {
+    ...body,
+    stream: true,
+    store: false,
+    parallel_tool_calls: true,
+    include: ['reasoning.encrypted_content'],
+    input: convertCodexSystemRoleToDeveloper(body.input),
+  };
+
+  if (typeof next.instructions !== 'string') {
+    next.instructions = '';
+  }
+
+  for (const key of [
+    'max_output_tokens',
+    'max_completion_tokens',
+    'temperature',
+    'top_p',
+    'truncation',
+    'user',
+    'context_management',
+    'previous_response_id',
+    'prompt_cache_retention',
+    'safety_identifier',
+  ]) {
+    delete next[key];
+  }
+
+  if (asTrimmedString(next.service_tier).toLowerCase() !== 'priority') {
+    delete next.service_tier;
+  }
+
+  return next;
+}
+
 
 function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
   const raw = asTrimmedString(value).toLowerCase();
@@ -255,6 +325,10 @@ function preferredEndpointOrder(
 
   if (platform === 'gemini') {
     // Gemini upstream is routed through OpenAI-compatible chat endpoint.
+    return ['chat'];
+  }
+
+  if (platform === 'gemini-cli') {
     return ['chat'];
   }
 
@@ -438,6 +512,8 @@ export function buildUpstreamEndpointRequest(input: {
   modelName: string;
   stream: boolean;
   tokenValue: string;
+  oauthProvider?: string;
+  oauthProjectId?: string;
   sitePlatform?: string;
   siteUrl?: string;
   openaiBody: Record<string, unknown>;
@@ -455,6 +531,8 @@ export function buildUpstreamEndpointRequest(input: {
   const sitePlatform = normalizePlatformName(input.sitePlatform);
   const isClaudeUpstream = sitePlatform === 'claude';
   const isGeminiUpstream = sitePlatform === 'gemini';
+  const isGeminiCliUpstream = sitePlatform === 'gemini-cli';
+  const isClaudeOauthUpstream = isClaudeUpstream && input.oauthProvider === 'claude';
 
   const resolveGeminiEndpointPath = (endpoint: UpstreamEndpoint): string => {
     const normalizedSiteUrl = asTrimmedString(input.siteUrl).toLowerCase();
@@ -484,6 +562,12 @@ export function buildUpstreamEndpointRequest(input: {
       return '/responses';
     }
 
+    if (sitePlatform === 'gemini-cli') {
+      return input.stream
+        ? '/v1internal:streamGenerateContent?alt=sse'
+        : '/v1internal:generateContent';
+    }
+
     if (sitePlatform === 'claude') {
       return '/v1/messages';
     }
@@ -505,7 +589,7 @@ export function buildUpstreamEndpointRequest(input: {
 
   const stripGeminiUnsupportedFields = (body: Record<string, unknown>) => {
     const next = { ...body };
-    if (isGeminiUpstream) {
+    if (isGeminiUpstream || isGeminiCliUpstream) {
       for (const key of [
         'frequency_penalty',
         'presence_penalty',
@@ -521,6 +605,34 @@ export function buildUpstreamEndpointRequest(input: {
   };
 
   const openaiBody = stripGeminiUnsupportedFields(input.openaiBody);
+
+  if (isGeminiCliUpstream) {
+    const projectId = asTrimmedString(input.oauthProjectId);
+    if (!projectId) {
+      throw new Error('gemini-cli oauth project id missing');
+    }
+    const instructions = (
+      input.downstreamFormat === 'responses'
+      && typeof input.responsesOriginalBody?.instructions === 'string'
+    )
+      ? input.responsesOriginalBody.instructions
+      : undefined;
+    const geminiRequest = buildGeminiGenerateContentRequestFromOpenAi({
+      body: openaiBody,
+      modelName: input.modelName,
+      instructions,
+    });
+    const headers = ensureStreamAcceptHeader(commonHeaders, input.stream);
+    return {
+      path: resolveEndpointPath(input.endpoint),
+      headers,
+      body: wrapGeminiCliRequest({
+        modelName: input.modelName,
+        projectId,
+        request: geminiRequest,
+      }) as Record<string, unknown>,
+    };
+  }
 
   if (input.endpoint === 'messages') {
     const claudeHeaders = input.downstreamFormat === 'claude'
@@ -562,8 +674,10 @@ export function buildUpstreamEndpointRequest(input: {
     const headers = ensureStreamAcceptHeader({
       ...commonHeaders,
       ...claudeHeaders,
-      'x-api-key': input.tokenValue,
       'anthropic-version': anthropicVersion,
+      ...(isClaudeOauthUpstream
+        ? { Authorization: `Bearer ${input.tokenValue}` }
+        : { 'x-api-key': input.tokenValue }),
     }, input.stream);
 
     return {
@@ -586,8 +700,14 @@ export function buildUpstreamEndpointRequest(input: {
         }
         : convertOpenAiBodyToResponsesBodyViaTransformer(openaiBody, input.modelName, input.stream)
     );
-    const body = ensureCodexResponsesInstructions(
-      sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream),
+    const body = ensureCodexResponsesStoreFalse(
+      ensureCodexResponsesInstructions(
+        applyCodexResponsesCompatibility(
+          sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream),
+          sitePlatform,
+        ),
+        sitePlatform,
+      ),
       sitePlatform,
     );
 

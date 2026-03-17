@@ -14,7 +14,7 @@ const resolveProxyUsageWithSelfLogFallbackMock = vi.fn(async ({ usage }: any) =>
   estimatedCostFromQuota: 0,
   recoveredFromSelfLog: false,
 }));
-const refreshCodexAccessTokenMock = vi.fn();
+const refreshOauthAccessTokenSingleflightMock = vi.fn();
 const dbInsertMock = vi.fn((_arg?: any) => ({
   values: () => ({
     run: () => undefined,
@@ -61,13 +61,9 @@ vi.mock('../../services/proxyUsageFallbackService.js', () => ({
   resolveProxyUsageWithSelfLogFallback: (arg: any) => resolveProxyUsageWithSelfLogFallbackMock(arg),
 }));
 
-vi.mock('../../services/oauth/service.js', async () => {
-  const actual = await vi.importActual<typeof import('../../services/oauth/service.js')>('../../services/oauth/service.js');
-  return {
-    ...actual,
-    refreshCodexOauthAccessToken: (...args: unknown[]) => refreshCodexAccessTokenMock(...args),
-  };
-});
+vi.mock('../../services/oauth/refreshSingleflight.js', () => ({
+  refreshOauthAccessTokenSingleflight: (...args: unknown[]) => refreshOauthAccessTokenSingleflightMock(...args),
+}));
 
 vi.mock('../../db/index.js', () => ({
   db: {
@@ -81,6 +77,21 @@ vi.mock('../../db/index.js', () => ({
 
 describe('responses proxy codex oauth refresh', () => {
   let app: FastifyInstance;
+
+  const createSseResponse = (chunks: string[], status = 200) => {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(encoder.encode(chunk));
+        }
+        controller.close();
+      },
+    }), {
+      status,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    });
+  };
 
   beforeAll(async () => {
     const { responsesProxyRoute } = await import('./responses.js');
@@ -98,7 +109,7 @@ describe('responses proxy codex oauth refresh', () => {
     reportProxyAllFailedMock.mockReset();
     reportTokenExpiredMock.mockReset();
     resolveProxyUsageWithSelfLogFallbackMock.mockClear();
-    refreshCodexAccessTokenMock.mockReset();
+    refreshOauthAccessTokenSingleflightMock.mockReset();
     dbInsertMock.mockClear();
 
     selectChannelMock.mockReturnValue({
@@ -122,7 +133,7 @@ describe('responses proxy codex oauth refresh', () => {
       actualModel: 'gpt-5.2-codex',
     });
     selectNextChannelMock.mockReturnValue(null);
-    refreshCodexAccessTokenMock.mockResolvedValue({
+    refreshOauthAccessTokenSingleflightMock.mockResolvedValue({
       accessToken: 'fresh-access-token',
       accountId: 33,
       accountKey: 'chatgpt-account-123',
@@ -163,7 +174,7 @@ describe('responses proxy codex oauth refresh', () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(refreshCodexAccessTokenMock).toHaveBeenCalledWith(33);
+    expect(refreshOauthAccessTokenSingleflightMock).toHaveBeenCalledWith(33);
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const [firstUrl, firstOptions] = fetchMock.mock.calls[0] as [string, any];
@@ -205,6 +216,7 @@ describe('responses proxy codex oauth refresh', () => {
     const [, options] = fetchMock.mock.calls[0] as [string, any];
     const forwardedBody = JSON.parse(options.body);
     expect(forwardedBody.instructions).toBe('');
+    expect(forwardedBody.stream).toBe(true);
     expect(forwardedBody.input).toEqual([
       {
         type: 'message',
@@ -212,5 +224,83 @@ describe('responses proxy codex oauth refresh', () => {
         content: [{ type: 'input_text', text: 'hello codex' }],
       },
     ]);
+  });
+
+  it('forces codex upstream responses requests to stream and aggregates the SSE payload for non-stream downstream callers', async () => {
+    fetchMock.mockResolvedValue(createSseResponse([
+      'event: response.created\n',
+      'data: {"type":"response.created","response":{"id":"resp_codex_stream","model":"gpt-5.4","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
+      'event: response.output_item.added\n',
+      'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_codex_stream","type":"message","role":"assistant","status":"in_progress","content":[]}}\n\n',
+      'event: response.output_text.delta\n',
+      'data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_codex_stream","delta":"pong"}\n\n',
+      'event: response.completed\n',
+      'data: {"type":"response.completed","response":{"id":"resp_codex_stream","model":"gpt-5.4","status":"completed","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}\n\n',
+      'data: [DONE]\n\n',
+    ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.4',
+        input: 'hello codex',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const [, options] = fetchMock.mock.calls[0] as [string, any];
+    const forwardedBody = JSON.parse(options.body);
+    expect(forwardedBody.stream).toBe(true);
+    expect(forwardedBody.instructions).toBe('');
+    expect(forwardedBody.store).toBe(false);
+
+    expect(response.json()).toMatchObject({
+      id: 'resp_codex_stream',
+      model: 'gpt-5.4',
+      status: 'completed',
+      output_text: 'pong',
+      usage: {
+        input_tokens: 3,
+        output_tokens: 1,
+        total_tokens: 4,
+      },
+    });
+  });
+
+  it('preserves codex-required instructions and store fields across responses compatibility retries', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      error: { message: 'upstream_error', type: 'upstream_error' },
+    }), {
+      status: 400,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.2-codex',
+        input: 'hello codex',
+        metadata: { trace: 'compatibility-retry' },
+      },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    const [, firstOptions] = fetchMock.mock.calls[0] as [string, any];
+    const [, secondOptions] = fetchMock.mock.calls[1] as [string, any];
+    const firstBody = JSON.parse(firstOptions.body);
+    const secondBody = JSON.parse(secondOptions.body);
+
+    expect(firstBody.instructions).toBe('');
+    expect(firstBody.store).toBe(false);
+    expect(firstBody.stream).toBe(true);
+    expect(secondBody.instructions).toBe('');
+    expect(secondBody.store).toBe(false);
+    expect(secondBody.stream).toBe(true);
   });
 });

@@ -210,6 +210,52 @@ describe('gemini native proxy routes', () => {
     expect(secondUrl).toContain('key=gemini-key-2');
   });
 
+  it('serves gemini-cli model list from local static catalog without upstream fetch', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 21, routeId: 22 },
+      site: { id: 55, name: 'gemini-cli-site', url: 'https://cloudcode-pa.googleapis.com', platform: 'gemini-cli' },
+      account: {
+        id: 35,
+        username: 'gemini-cli-user@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'gemini-cli',
+            email: 'gemini-cli-user@example.com',
+            projectId: 'project-demo',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'oauth-access-token',
+      actualModel: 'gemini-2.5-pro',
+    });
+    explainSelectionMock.mockImplementation(async (modelName: string) => (
+      modelName === 'gemini-2.5-pro'
+        ? { selectedChannelId: 21 }
+        : { selectedChannelId: undefined }
+    ));
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/v1beta/models',
+      headers: {
+        authorization: 'Bearer sk-managed-gemini',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(response.json()).toMatchObject({
+      models: expect.arrayContaining([
+        {
+          name: 'models/gemini-2.5-pro',
+          displayName: 'Gemini 2.5 Pro',
+        },
+      ]),
+    });
+  });
+
   it('forwards native generateContent requests through the gemini route group', async () => {
     fetchMock.mockResolvedValue(new Response(JSON.stringify({
       candidates: [
@@ -262,6 +308,95 @@ describe('gemini native proxy routes', () => {
           index: 0,
           content: {
             parts: [{ text: 'hello from gemini' }],
+            role: 'model',
+          },
+          finishReason: 'STOP',
+        },
+      ],
+    });
+  });
+
+  it('wraps gemini-cli native generateContent requests and unwraps the response payload', async () => {
+    selectChannelMock.mockReturnValue({
+      channel: { id: 31, routeId: 22 },
+      site: { id: 66, name: 'gemini-cli-site', url: 'https://cloudcode-pa.googleapis.com', platform: 'gemini-cli' },
+      account: {
+        id: 36,
+        username: 'gemini-cli-user@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'gemini-cli',
+            email: 'gemini-cli-user@example.com',
+            projectId: 'project-demo',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'oauth-access-token',
+      actualModel: 'gemini-2.5-pro',
+    });
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+      response: {
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'hello from gemini cli' }],
+              role: 'model',
+            },
+            finishReason: 'STOP',
+          },
+        ],
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-pro:generateContent',
+      headers: {
+        authorization: 'Bearer sk-managed-gemini',
+      },
+      payload: {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [targetUrl, requestInit] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(targetUrl).toBe('https://cloudcode-pa.googleapis.com/v1internal:generateContent');
+    expect(requestInit.headers).toMatchObject({
+      Authorization: 'Bearer oauth-access-token',
+    });
+    expect((requestInit.headers as Record<string, string>)['User-Agent']).toContain('GeminiCLI/');
+    expect((requestInit.headers as Record<string, string>)['X-Goog-Api-Client']).toContain('google-genai-sdk/');
+    expect(JSON.parse(String(requestInit.body))).toEqual({
+      project: 'project-demo',
+      model: 'gemini-2.5-pro',
+      request: {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: 'hello' }],
+          },
+        ],
+      },
+    });
+    expect(response.json()).toEqual({
+      responseId: '',
+      modelVersion: '',
+      candidates: [
+        {
+          index: 0,
+          content: {
+            parts: [{ text: 'hello from gemini cli' }],
             role: 'model',
           },
           finishReason: 'STOP',

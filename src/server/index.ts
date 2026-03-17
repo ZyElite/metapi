@@ -25,7 +25,7 @@ import { buildStartupSummaryLines } from './services/startupInfo.js';
 import { repairStoredCreatedAtValues } from './services/storedTimestampRepairService.js';
 import { migrateSiteApiKeysToAccounts } from './services/siteApiKeyMigrationService.js';
 import { ensureDefaultSitesSeeded } from './services/defaultSiteSeedService.js';
-import { startCodexLoopbackCallbackServer, stopCodexLoopbackCallbackServer } from './services/oauth/localCallbackServer.js';
+import { startOAuthLoopbackCallbackServers, stopOAuthLoopbackCallbackServers } from './services/oauth/localCallbackServer.js';
 import { ensureRuntimeDatabaseReady } from './runtimeDatabaseBootstrap.js';
 import { isPublicApiRoute, registerDesktopRoutes } from './desktop.js';
 import { existsSync } from 'fs';
@@ -349,14 +349,14 @@ if (existsSync(webDir)) {
 // Start scheduler
 await startScheduler();
 try {
-  await startCodexLoopbackCallbackServer();
+  await startOAuthLoopbackCallbackServers();
 } catch (error) {
-  console.warn(`Failed to start Codex OAuth callback listener: ${(error as Error)?.message || 'unknown error'}`);
+  console.warn(`Failed to start OAuth callback listeners: ${(error as Error)?.message || 'unknown error'}`);
 }
 setLegacyProxyLogRetentionFallbackEnabled(!config.logCleanupConfigured);
 app.addHook('onClose', async () => {
   stopProxyLogRetentionService();
-  await stopCodexLoopbackCallbackServer();
+  await stopOAuthLoopbackCallbackServers();
 });
 
 // Start server

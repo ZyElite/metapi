@@ -1,18 +1,32 @@
-import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import Fastify from 'fastify';
+import { afterEach, describe, expect, it } from 'vitest';
+import { oauthRoutes } from './oauth.js';
+import { isPublicApiRoute } from '../../desktop.js';
 
 describe('oauth route registration', () => {
-  it('registers oauth routes in the main server entry', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/server/index.ts'), 'utf8');
+  const apps: Array<Awaited<ReturnType<typeof Fastify>>> = [];
 
-    expect(source).toContain("import { oauthRoutes } from './routes/api/oauth.js';");
-    expect(source).toContain('await app.register(oauthRoutes);');
+  afterEach(async () => {
+    await Promise.all(apps.splice(0).map((app) => app.close()));
   });
 
-  it('treats oauth callback as a public API route', () => {
-    const source = readFileSync(resolve(process.cwd(), 'src/server/desktop.ts'), 'utf8');
+  it('registers oauth routes on a Fastify instance at runtime', async () => {
+    const app = Fastify();
+    apps.push(app);
+    await app.register(oauthRoutes);
 
-    expect(source).toContain("url.startsWith('/api/oauth/callback/')");
+    const routes = app.printRoutes();
+    expect(routes).toContain('providers (GET, HEAD)');
+    expect(routes).toContain(':provider');
+    expect(routes).toContain('sessions/');
+    expect(routes).toContain(':state (GET, HEAD)');
+    expect(routes).toContain('onnections (GET, HEAD)');
+    expect(routes).toContain('allback/');
+  });
+
+  it('treats oauth callback route as a public desktop API route', () => {
+    expect(isPublicApiRoute('/api/oauth/callback/codex')).toBe(true);
+    expect(isPublicApiRoute('/api/oauth/callback/claude')).toBe(true);
+    expect(isPublicApiRoute('/api/oauth/providers')).toBe(false);
   });
 });

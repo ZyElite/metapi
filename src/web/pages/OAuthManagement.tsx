@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, type OAuthConnectionInfo, type OAuthProviderInfo } from '../api.js';
 
 const POLL_INTERVAL_MS = 1500;
+const CONNECTION_PAGE_LIMIT = 100;
 
 type ActiveSession = {
   provider: string;
@@ -13,8 +14,15 @@ function openOAuthPopup(provider: string, authorizationUrl: string) {
   const popup = window.open(
     authorizationUrl,
     `oauth-${provider}`,
-    'popup=yes,width=540,height=760,resizable=yes,scrollbars=yes',
+    'popup=yes,width=540,height=760,resizable=yes,scrollbars=yes,noopener,noreferrer',
   );
+  if (popup) {
+    try {
+      popup.opener = null;
+    } catch {
+      // Ignore cross-window opener hardening failures.
+    }
+  }
   if (popup && typeof popup.focus === 'function') {
     popup.focus();
   }
@@ -33,7 +41,10 @@ export default function OAuthManagement() {
   const [actionLoadingKey, setActionLoadingKey] = useState('');
 
   const loadConnections = async () => {
-    const response = await api.getOAuthConnections();
+    const response = await api.getOAuthConnections({
+      limit: CONNECTION_PAGE_LIMIT,
+      offset: 0,
+    });
     setConnections(Array.isArray(response?.items) ? response.items : []);
   };
 
@@ -44,6 +55,9 @@ export default function OAuthManagement() {
         loadConnections(),
       ]);
       setProviders(Array.isArray(providersResponse?.providers) ? providersResponse.providers : []);
+    } catch (error) {
+      console.error('failed to load oauth management data', error);
+      setSessionMessage('OAuth 管理数据加载失败');
     } finally {
       setLoaded(true);
     }
@@ -93,19 +107,30 @@ export default function OAuthManagement() {
     };
   }, [activeSession]);
 
-  const handleStart = async (provider: string, accountId?: number) => {
-    const actionKey = `start:${provider}:${accountId || 0}`;
+  const handleStart = async (provider: OAuthProviderInfo, accountId?: number) => {
+    const actionKey = `start:${provider.provider}:${accountId || 0}`;
     setActionLoadingKey(actionKey);
     try {
+      const projectId = provider.requiresProjectId
+        ? (() => {
+          if (typeof window === 'undefined' || typeof window.prompt !== 'function') return undefined;
+          const value = window.prompt('输入 Google Cloud Project ID');
+          return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+        })()
+        : undefined;
+      if (provider.requiresProjectId && !projectId && !accountId) {
+        setSessionMessage('Gemini CLI 连接需要 Project ID');
+        return;
+      }
       const started = accountId
         ? await api.rebindOAuthConnection(accountId)
-        : await api.startOAuthProvider(provider);
+        : await api.startOAuthProvider(provider.provider, { projectId });
       setSessionMessage('等待授权完成');
       setActiveSession({
         provider: started.provider,
         state: started.state,
       });
-      openOAuthPopup(provider, started.authorizationUrl);
+      openOAuthPopup(provider.provider, started.authorizationUrl);
     } catch (error: any) {
       setSessionMessage(error?.message || '无法启动 OAuth 授权');
     } finally {
@@ -136,7 +161,7 @@ export default function OAuthManagement() {
       <div className="page-header">
         <div>
           <div className="page-title">OAuth 管理</div>
-          <div className="page-subtitle">统一管理需要浏览器授权的上游连接。首版支持 Codex。</div>
+          <div className="page-subtitle">统一管理需要浏览器授权的上游连接，包括 Codex、Claude 和 Gemini CLI。</div>
         </div>
       </div>
 
@@ -155,12 +180,16 @@ export default function OAuthManagement() {
               <div key={provider.provider} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
                 <div>
                   <div style={{ fontSize: 14, fontWeight: 600 }}>{provider.label}</div>
-                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>{provider.platform}</div>
+                  <div style={{ fontSize: 12, color: 'var(--color-text-muted)' }}>
+                    {provider.platform}
+                    {provider.requiresProjectId ? ' · 需要 Project ID' : ''}
+                    {provider.supportsNativeProxy ? ' · 原生代理' : ''}
+                  </div>
                 </div>
                 <button
                   type="button"
                   className="btn btn-primary"
-                  onClick={() => handleStart(provider.provider)}
+                  onClick={() => handleStart(provider)}
                   disabled={actionLoadingKey === actionKey}
                 >
                   {actionLoadingKey === actionKey ? '启动中...' : `连接 ${provider.label}`}
@@ -188,6 +217,11 @@ export default function OAuthManagement() {
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                       {connection.planType || 'unknown'} · {connection.modelCount} 个模型
                     </div>
+                    {connection.projectId && (
+                      <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
+                        Project: {connection.projectId}
+                      </div>
+                    )}
                     <div style={{ fontSize: 12, color: 'var(--color-text-muted)', marginTop: 4 }}>
                       {resolveConnectionStatusLabel(connection.status)} · {connection.routeChannelCount || 0} 条路由
                     </div>
@@ -211,7 +245,20 @@ export default function OAuthManagement() {
                     <button
                       type="button"
                       className="btn btn-ghost"
-                      onClick={() => handleStart(connection.provider, connection.accountId)}
+                      onClick={() => handleStart(
+                        providers.find((provider) => provider.provider === connection.provider) || {
+                          provider: connection.provider,
+                          label: connection.provider,
+                          platform: connection.site?.platform || connection.provider,
+                          enabled: true,
+                          loginType: 'oauth',
+                          requiresProjectId: false,
+                          supportsDirectAccountRouting: true,
+                          supportsCloudValidation: true,
+                          supportsNativeProxy: false,
+                        },
+                        connection.accountId,
+                      )}
                       disabled={actionLoadingKey === rebindActionKey || actionLoadingKey === deleteActionKey}
                     >
                       {actionLoadingKey === rebindActionKey ? '启动中...' : '重新授权'}

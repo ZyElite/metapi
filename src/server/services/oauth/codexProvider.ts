@@ -1,15 +1,50 @@
 import { fetch } from 'undici';
+import { config } from '../../config.js';
 import { createPkceChallenge } from './sessionStore.js';
+import type { OAuthProviderDefinition } from './providers.js';
 
 export const CODEX_OAUTH_PROVIDER = 'codex';
 export const CODEX_AUTH_URL = 'https://auth.openai.com/oauth/authorize';
 export const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
-export const CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
+export const CODEX_CLIENT_ID = config.codexClientId;
 export const CODEX_CALLBACK_PATH = '/api/oauth/callback/codex';
 export const CODEX_LOOPBACK_CALLBACK_PATH = '/auth/callback';
 export const CODEX_LOOPBACK_CALLBACK_PORT = 1455;
 export const CODEX_LOOPBACK_REDIRECT_URI = `http://localhost:${CODEX_LOOPBACK_CALLBACK_PORT}${CODEX_LOOPBACK_CALLBACK_PATH}`;
 export const CODEX_UPSTREAM_BASE_URL = 'https://chatgpt.com/backend-api/codex';
+
+function requireCodexClientId(): string {
+  if (!CODEX_CLIENT_ID) {
+    throw new Error('CODEX_CLIENT_ID is not configured');
+  }
+  return CODEX_CLIENT_ID;
+}
+
+function normalizeOrigin(origin?: string): string | null {
+  if (typeof origin !== 'string') return null;
+  const trimmed = origin.trim().replace(/\/+$/, '');
+  return trimmed || null;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '::1' || normalized === '[::1]';
+}
+
+export function resolveCodexRedirectUri(requestOrigin?: string): string {
+  const origin = normalizeOrigin(requestOrigin);
+  if (!origin) return CODEX_LOOPBACK_REDIRECT_URI;
+
+  try {
+    const parsed = new URL(origin);
+    if (isLoopbackHostname(parsed.hostname)) {
+      return CODEX_LOOPBACK_REDIRECT_URI;
+    }
+    return `${origin}${CODEX_CALLBACK_PATH}`;
+  } catch {
+    return CODEX_LOOPBACK_REDIRECT_URI;
+  }
+}
 
 type CodexJwtClaims = {
   email?: unknown;
@@ -47,18 +82,18 @@ function parseJwtClaims(token: string): CodexJwtClaims | null {
   }
 }
 
-export function buildCodexAuthorizationUrl(input: {
+export async function buildCodexAuthorizationUrl(input: {
   state: string;
   redirectUri: string;
   codeVerifier: string;
-}): string {
+}): Promise<string> {
   const params = new URLSearchParams({
-    client_id: CODEX_CLIENT_ID,
+    client_id: requireCodexClientId(),
     response_type: 'code',
     redirect_uri: input.redirectUri,
     scope: 'openid email profile offline_access',
     state: input.state,
-    code_challenge: createPkceChallenge(input.codeVerifier),
+    code_challenge: await createPkceChallenge(input.codeVerifier),
     code_challenge_method: 'S256',
     prompt: 'login',
     id_token_add_organizations: 'true',
@@ -116,7 +151,7 @@ export async function exchangeCodexAuthorizationCode(input: {
 }): Promise<CodexTokenExchangeResult> {
   return exchangeCodexToken(new URLSearchParams({
     grant_type: 'authorization_code',
-    client_id: CODEX_CLIENT_ID,
+    client_id: requireCodexClientId(),
     code: input.code,
     redirect_uri: input.redirectUri,
     code_verifier: input.codeVerifier,
@@ -125,9 +160,101 @@ export async function exchangeCodexAuthorizationCode(input: {
 
 export async function refreshCodexTokens(refreshToken: string): Promise<CodexTokenExchangeResult> {
   return exchangeCodexToken(new URLSearchParams({
-    client_id: CODEX_CLIENT_ID,
+    client_id: requireCodexClientId(),
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
     scope: 'openid profile email',
   }));
 }
+
+function getHeaderValue(headers: Record<string, unknown> | undefined, key: string): string | undefined {
+  if (!headers) return undefined;
+  const loweredKey = key.toLowerCase();
+  for (const [rawKey, rawValue] of Object.entries(headers)) {
+    if (rawKey.toLowerCase() !== loweredKey) continue;
+    if (typeof rawValue === 'string') {
+      const trimmed = rawValue.trim();
+      if (trimmed) return trimmed;
+    }
+    if (Array.isArray(rawValue)) {
+      for (const item of rawValue) {
+        if (typeof item !== 'string') continue;
+        const trimmed = item.trim();
+        if (trimmed) return trimmed;
+      }
+    }
+  }
+  return undefined;
+}
+
+export const codexOauthProvider: OAuthProviderDefinition = {
+  metadata: {
+    provider: CODEX_OAUTH_PROVIDER,
+    label: 'Codex',
+    platform: 'codex',
+    enabled: true,
+    loginType: 'oauth',
+    requiresProjectId: false,
+    supportsDirectAccountRouting: true,
+    supportsCloudValidation: true,
+    supportsNativeProxy: true,
+  },
+  site: {
+    name: 'ChatGPT Codex OAuth',
+    url: CODEX_UPSTREAM_BASE_URL,
+    platform: 'codex',
+  },
+  loopback: {
+    host: '127.0.0.1',
+    port: CODEX_LOOPBACK_CALLBACK_PORT,
+    path: CODEX_LOOPBACK_CALLBACK_PATH,
+    redirectUri: CODEX_LOOPBACK_REDIRECT_URI,
+  },
+  resolveRedirectUri: ({ requestOrigin }) => resolveCodexRedirectUri(requestOrigin),
+  buildAuthorizationUrl: ({ state, redirectUri, codeVerifier }) => buildCodexAuthorizationUrl({
+    state,
+    redirectUri,
+    codeVerifier,
+  }),
+  exchangeAuthorizationCode: async ({ code, redirectUri, codeVerifier }) => {
+    const exchange = await exchangeCodexAuthorizationCode({
+      code,
+      redirectUri,
+      codeVerifier,
+    });
+    return {
+      accessToken: exchange.accessToken,
+      refreshToken: exchange.refreshToken,
+      tokenExpiresAt: exchange.tokenExpiresAt,
+      email: exchange.email,
+      accountId: exchange.accountId,
+      accountKey: exchange.accountId,
+      planType: exchange.planType,
+      idToken: exchange.idToken,
+    };
+  },
+  refreshAccessToken: async ({ refreshToken }) => {
+    const refreshed = await refreshCodexTokens(refreshToken);
+    return {
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      tokenExpiresAt: refreshed.tokenExpiresAt,
+      email: refreshed.email,
+      accountId: refreshed.accountId,
+      accountKey: refreshed.accountId,
+      planType: refreshed.planType,
+      idToken: refreshed.idToken,
+    };
+  },
+  buildProxyHeaders: ({ oauth, downstreamHeaders }) => {
+    const accountId = getHeaderValue(downstreamHeaders, 'chatgpt-account-id') || oauth.accountId || oauth.accountKey;
+    const originator = getHeaderValue(downstreamHeaders, 'originator') || 'codex_cli_rs';
+    const headers: Record<string, string> = {
+      Originator: originator,
+    };
+    if (accountId) {
+      headers['Chatgpt-Account-Id'] = accountId;
+    }
+    return headers;
+  },
+};

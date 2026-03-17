@@ -24,6 +24,10 @@ function parseCsvList(value: string | undefined): string[] {
     .filter((item) => item.length > 0);
 }
 
+function parseOptionalSecret(value: string | undefined): string {
+  return (value || '').trim();
+}
+
 function parseDbType(value: string | undefined): 'sqlite' | 'mysql' | 'postgres' {
   const normalized = (value || 'sqlite').trim().toLowerCase();
   if (normalized === 'mysql') return 'mysql';
@@ -41,6 +45,11 @@ export function buildConfig(env: NodeJS.ProcessEnv) {
   return {
     authToken: env.AUTH_TOKEN || 'change-me-admin-token',
     proxyToken: env.PROXY_TOKEN || 'change-me-proxy-sk-token',
+    codexClientId: parseOptionalSecret(env.CODEX_CLIENT_ID),
+    claudeClientId: parseOptionalSecret(env.CLAUDE_CLIENT_ID),
+    claudeClientSecret: parseOptionalSecret(env.CLAUDE_CLIENT_SECRET),
+    geminiCliClientId: parseOptionalSecret(env.GEMINI_CLI_CLIENT_ID),
+    geminiCliClientSecret: parseOptionalSecret(env.GEMINI_CLI_CLIENT_SECRET),
     systemProxyUrl: env.SYSTEM_PROXY_URL || '',
     accountCredentialSecret: env.ACCOUNT_CREDENTIAL_SECRET || env.AUTH_TOKEN || 'change-me-admin-token',
     checkinCron: env.CHECKIN_CRON || '0 8 * * *',

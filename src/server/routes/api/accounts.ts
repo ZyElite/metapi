@@ -8,6 +8,7 @@ import { ensureDefaultTokenForAccount, syncTokensFromUpstream } from '../../serv
 import {
   getCredentialModeFromExtraConfig,
   guessPlatformUserIdFromUsername,
+  hasOauthProvider,
   getSub2ApiAuthFromExtraConfig,
   mergeAccountExtraConfig,
   normalizeCredentialMode as normalizeCredentialModeInput,
@@ -19,7 +20,6 @@ import { startBackgroundTask } from '../../services/backgroundTaskService.js';
 import { parseCheckinRewardAmount } from '../../services/checkinRewardParser.js';
 import { estimateRewardWithTodayIncomeFallback } from '../../services/todayIncomeRewardService.js';
 import { getLocalDayRangeUtc } from '../../services/localTimeService.js';
-import { isCodexPlatform } from '../../services/oauth/codexAccount.js';
 import {
   buildRuntimeHealthForAccount,
   setAccountRuntimeHealth,
@@ -82,11 +82,11 @@ function buildCapabilitiesFromCredentialMode(
   hasSessionToken: boolean,
   extraConfig?: string | null,
 ): AccountCapabilities {
-  if (isCodexPlatform(extraConfig)) {
+  if (hasOauthProvider(extraConfig)) {
     return {
       canCheckin: false,
       canRefreshBalance: false,
-      proxyOnly: false,
+      proxyOnly: true,
     };
   }
   const sessionCapable = credentialMode === 'session'

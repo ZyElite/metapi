@@ -1,39 +1,31 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { type AddressInfo } from 'node:net';
-import {
-  CODEX_LOOPBACK_CALLBACK_PATH,
-  CODEX_LOOPBACK_CALLBACK_PORT,
-  CODEX_OAUTH_PROVIDER,
-} from './codexProvider.js';
+import { getOAuthProviderDefinition, listOAuthProviderDefinitions } from './providers.js';
 import { handleOauthCallback } from './service.js';
 
 type CallbackHandler = typeof handleOauthCallback;
 
-type StartCodexLoopbackCallbackServerOptions = {
-  port?: number;
+type StartOAuthLoopbackCallbackServerOptions = {
   host?: string;
+  port?: number;
   callbackHandler?: CallbackHandler;
 };
 
-export type CodexLoopbackCallbackServerState = {
+export type OAuthLoopbackCallbackServerState = {
+  provider: string;
   attempted: boolean;
   ready: boolean;
   host?: string;
   port: number;
+  path: string;
   origin: string;
+  redirectUri: string;
   error?: string;
 };
 
-const DEFAULT_STATE: CodexLoopbackCallbackServerState = {
-  attempted: false,
-  ready: false,
-  port: CODEX_LOOPBACK_CALLBACK_PORT,
-  origin: `http://localhost:${CODEX_LOOPBACK_CALLBACK_PORT}`,
-};
-
-let callbackServer: Server | null = null;
-let callbackServerState: CodexLoopbackCallbackServerState = { ...DEFAULT_STATE };
-let startPromise: Promise<CodexLoopbackCallbackServerState> | null = null;
+const servers = new Map<string, Server>();
+const states = new Map<string, OAuthLoopbackCallbackServerState>();
+const startPromises = new Map<string, Promise<OAuthLoopbackCallbackServerState>>();
 
 function escapeHtml(value: string): string {
   return value
@@ -50,7 +42,7 @@ function renderCompletionPage(message: string): string {
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <title>Codex OAuth Callback</title>
+    <title>OAuth Callback</title>
   </head>
   <body>
     <script>window.close();</script>
@@ -67,37 +59,6 @@ function respondHtml(response: ServerResponse, statusCode: number, message: stri
   response.end(renderCompletionPage(message));
 }
 
-async function handleCallbackRequest(
-  request: IncomingMessage,
-  response: ServerResponse,
-  callbackHandler: CallbackHandler,
-) {
-  if (request.method !== 'GET') {
-    response.writeHead(405, { Allow: 'GET' });
-    response.end('Method not allowed');
-    return;
-  }
-
-  const requestUrl = new URL(request.url || '/', 'http://localhost');
-  if (requestUrl.pathname !== CODEX_LOOPBACK_CALLBACK_PATH) {
-    response.writeHead(404);
-    response.end('Not found');
-    return;
-  }
-
-  try {
-    await callbackHandler({
-      provider: CODEX_OAUTH_PROVIDER,
-      state: requestUrl.searchParams.get('state') || '',
-      code: requestUrl.searchParams.get('code') || undefined,
-      error: requestUrl.searchParams.get('error') || undefined,
-    });
-    respondHtml(response, 200, 'OAuth authorization succeeded. You can close this window.');
-  } catch (error: any) {
-    respondHtml(response, 500, `OAuth authorization failed: ${error?.message || 'unknown error'}`);
-  }
-}
-
 function normalizeOrigin(host: string | undefined, port: number): string {
   if (!host || host === '::' || host === '0.0.0.0') {
     return `http://localhost:${port}`;
@@ -108,76 +69,177 @@ function normalizeOrigin(host: string | undefined, port: number): string {
   return `http://${host}:${port}`;
 }
 
-export function getCodexLoopbackCallbackServerState(): CodexLoopbackCallbackServerState {
-  return { ...callbackServerState };
+function createDefaultState(provider: string): OAuthLoopbackCallbackServerState {
+  const definition = getOAuthProviderDefinition(provider);
+  if (!definition) {
+    throw new Error(`unsupported oauth provider: ${provider}`);
+  }
+  return {
+    provider,
+    attempted: false,
+    ready: false,
+    host: definition.loopback.host,
+    port: definition.loopback.port,
+    path: definition.loopback.path,
+    origin: normalizeOrigin(definition.loopback.host, definition.loopback.port),
+    redirectUri: definition.loopback.redirectUri,
+  };
 }
 
-export async function startCodexLoopbackCallbackServer(
-  options: StartCodexLoopbackCallbackServerOptions = {},
-): Promise<CodexLoopbackCallbackServerState> {
-  if (callbackServer) {
-    return getCodexLoopbackCallbackServerState();
+async function handleCallbackRequest(
+  provider: string,
+  request: IncomingMessage,
+  response: ServerResponse,
+  callbackHandler: CallbackHandler,
+) {
+  const definition = getOAuthProviderDefinition(provider);
+  if (!definition) {
+    response.writeHead(404);
+    response.end('Not found');
+    return;
   }
-  if (startPromise) {
-    return startPromise;
+
+  if (request.method !== 'GET') {
+    response.writeHead(405, { Allow: 'GET' });
+    response.end('Method not allowed');
+    return;
+  }
+
+  const requestUrl = new URL(request.url || '/', 'http://localhost');
+  if (requestUrl.pathname !== definition.loopback.path) {
+    response.writeHead(404);
+    response.end('Not found');
+    return;
+  }
+
+  try {
+    await callbackHandler({
+      provider,
+      state: requestUrl.searchParams.get('state') || '',
+      code: requestUrl.searchParams.get('code') || undefined,
+      error: requestUrl.searchParams.get('error') || undefined,
+    });
+    respondHtml(response, 200, 'OAuth authorization succeeded. You can close this window.');
+  } catch {
+    respondHtml(response, 500, 'OAuth authorization failed. Return to metapi and review the server logs.');
+  }
+}
+
+export function getOAuthLoopbackCallbackServerState(provider: string): OAuthLoopbackCallbackServerState {
+  return { ...(states.get(provider) || createDefaultState(provider)) };
+}
+
+export function getOAuthLoopbackCallbackServerStates(): OAuthLoopbackCallbackServerState[] {
+  return listOAuthProviderDefinitions().map((provider) => getOAuthLoopbackCallbackServerState(provider.metadata.provider));
+}
+
+export async function startOAuthLoopbackCallbackServer(
+  provider: string,
+  options: StartOAuthLoopbackCallbackServerOptions = {},
+): Promise<OAuthLoopbackCallbackServerState> {
+  const definition = getOAuthProviderDefinition(provider);
+  if (!definition) {
+    throw new Error(`unsupported oauth provider: ${provider}`);
+  }
+  if (servers.has(provider)) {
+    return getOAuthLoopbackCallbackServerState(provider);
+  }
+  const existingStart = startPromises.get(provider);
+  if (existingStart) {
+    return existingStart;
   }
 
   const callbackHandler = options.callbackHandler || handleOauthCallback;
-  const requestedPort = options.port ?? CODEX_LOOPBACK_CALLBACK_PORT;
-  const requestedHost = options.host;
-
-  startPromise = new Promise<CodexLoopbackCallbackServerState>((resolve, reject) => {
+  const host = options.host || definition.loopback.host;
+  const port = options.port ?? definition.loopback.port;
+  const { path, redirectUri } = definition.loopback;
+  const startPromise = new Promise<OAuthLoopbackCallbackServerState>((resolve, reject) => {
     const server = createServer((request, response) => {
-      void handleCallbackRequest(request, response, callbackHandler);
+      void handleCallbackRequest(provider, request, response, callbackHandler);
     });
 
     const finalizeFailure = (error: Error) => {
-      callbackServerState = {
+      const failedState: OAuthLoopbackCallbackServerState = {
+        provider,
         attempted: true,
         ready: false,
-        host: requestedHost,
-        port: requestedPort,
-        origin: normalizeOrigin(requestedHost, requestedPort),
-        error: error.message || 'failed to start codex oauth callback server',
+        host,
+        port,
+        path,
+        origin: normalizeOrigin(host, port),
+        redirectUri,
+        error: error.message || `failed to start ${provider} oauth callback server`,
       };
-      callbackServer = null;
+      states.set(provider, failedState);
+      servers.delete(provider);
       reject(error);
     };
 
-    server.once('error', (error) => {
-      finalizeFailure(error as Error);
-    });
+    const onStartupError = (error: Error) => {
+      finalizeFailure(error);
+    };
 
-    server.listen(requestedPort, requestedHost, () => {
-      server.removeAllListeners('error');
-      callbackServer = server;
+    server.once('error', onStartupError);
+    server.listen(port, host, () => {
+      server.off('error', onStartupError);
+      servers.set(provider, server);
       const address = server.address() as AddressInfo | null;
-      const port = address?.port || requestedPort;
-      const host = address?.address || requestedHost;
-      callbackServerState = {
+      const listeningPort = address?.port || port;
+      const listeningHost = address?.address || host;
+      const nextState: OAuthLoopbackCallbackServerState = {
+        provider,
         attempted: true,
         ready: true,
-        host,
-        port,
-        origin: normalizeOrigin(host, port),
+        host: listeningHost,
+        port: listeningPort,
+        path,
+        origin: normalizeOrigin(listeningHost, listeningPort),
+        redirectUri,
       };
-      resolve(getCodexLoopbackCallbackServerState());
+      states.set(provider, nextState);
+      resolve(getOAuthLoopbackCallbackServerState(provider));
     });
   }).finally(() => {
-    startPromise = null;
+    startPromises.delete(provider);
   });
 
+  startPromises.set(provider, startPromise);
   return startPromise;
 }
 
-export async function stopCodexLoopbackCallbackServer(): Promise<void> {
-  const server = callbackServer;
-  callbackServer = null;
-  callbackServerState = { ...DEFAULT_STATE };
-
-  if (!server) return;
-
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
+export async function startOAuthLoopbackCallbackServers(
+  options: StartOAuthLoopbackCallbackServerOptions = {},
+): Promise<OAuthLoopbackCallbackServerState[]> {
+  const results = await Promise.allSettled(
+    listOAuthProviderDefinitions().map((provider) =>
+      startOAuthLoopbackCallbackServer(provider.metadata.provider, options)),
+  );
+  return results.map((result, index) => {
+    if (result.status === 'fulfilled') return result.value;
+    return getOAuthLoopbackCallbackServerState(listOAuthProviderDefinitions()[index]!.metadata.provider);
   });
+}
+
+export async function stopOAuthLoopbackCallbackServers(): Promise<void> {
+  const activeServers = Array.from(servers.entries());
+  servers.clear();
+  states.clear();
+  startPromises.clear();
+
+  await Promise.all(activeServers.map(async ([provider, server]) => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    }).catch(() => undefined);
+    states.set(provider, createDefaultState(provider));
+  }));
+}
+
+export async function startCodexLoopbackCallbackServer(
+  options: StartOAuthLoopbackCallbackServerOptions = {},
+): Promise<OAuthLoopbackCallbackServerState> {
+  return startOAuthLoopbackCallbackServer('codex', options);
+}
+
+export async function stopCodexLoopbackCallbackServer(): Promise<void> {
+  await stopOAuthLoopbackCallbackServers();
 }

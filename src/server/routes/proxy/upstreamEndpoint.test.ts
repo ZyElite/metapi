@@ -340,6 +340,10 @@ describe('buildUpstreamEndpointRequest', () => {
       openaiBody: {
         model: 'gpt-5.2-codex',
         messages: [{ role: 'user', content: 'hello codex' }],
+        temperature: 0.2,
+        top_p: 0.9,
+        user: 'drop-me',
+        service_tier: 'auto',
       },
       downstreamFormat: 'openai',
       providerHeaders: {
@@ -352,6 +356,125 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.headers.Authorization).toBe('Bearer oauth-access-token');
     expect(request.headers.Originator).toBe('codex_cli_rs');
     expect(request.headers['Chatgpt-Account-Id']).toBe('chatgpt-account-123');
+    expect(request.body.instructions).toBe('');
+    expect(request.body.stream).toBe(true);
+    expect(request.body.store).toBe(false);
+    expect(request.body.parallel_tool_calls).toBe(true);
+    expect(request.body.include).toEqual(['reasoning.encrypted_content']);
+    expect(request.body.max_output_tokens).toBeUndefined();
+    expect(request.body.temperature).toBeUndefined();
+    expect(request.body.top_p).toBeUndefined();
+    expect(request.body.user).toBeUndefined();
+    expect(request.body.service_tier).toBeUndefined();
+  });
+
+  it('builds gemini-cli native requests with project envelope and bearer headers', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gemini-2.5-pro',
+      stream: true,
+      tokenValue: 'oauth-access-token',
+      oauthProvider: 'gemini-cli',
+      oauthProjectId: 'project-demo',
+      sitePlatform: 'gemini-cli',
+      siteUrl: 'https://cloudcode-pa.googleapis.com',
+      openaiBody: {
+        model: 'gemini-2.5-pro',
+        messages: [
+          { role: 'system', content: 'be concise' },
+          { role: 'user', content: 'hello gemini cli' },
+        ],
+        temperature: 0.4,
+      },
+      downstreamFormat: 'openai',
+      providerHeaders: {
+        'User-Agent': 'GeminiCLI/0.31.0/unknown (win32; x64)',
+        'X-Goog-Api-Client': 'google-genai-sdk/1.41.0 gl-node/v22.19.0',
+      },
+    });
+
+    expect(request.path).toBe('/v1internal:streamGenerateContent?alt=sse');
+    expect(request.headers.Authorization).toBe('Bearer oauth-access-token');
+    expect(request.headers['User-Agent']).toContain('GeminiCLI/');
+    expect(request.headers['X-Goog-Api-Client']).toContain('google-genai-sdk/');
+    expect(request.body.project).toBe('project-demo');
+    expect(request.body.model).toBe('gemini-2.5-pro');
+    expect(request.body.request).toMatchObject({
+      generationConfig: {
+        temperature: 0.4,
+      },
+      systemInstruction: {
+        role: 'user',
+      },
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: 'hello gemini cli' }],
+        },
+      ],
+    });
+  });
+
+  it('uses bearer auth for claude oauth upstream requests', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'messages',
+      modelName: 'claude-opus-4-6',
+      stream: false,
+      tokenValue: 'oauth-access-token',
+      oauthProvider: 'claude',
+      sitePlatform: 'claude',
+      siteUrl: 'https://api.anthropic.com',
+      openaiBody: {
+        model: 'claude-opus-4-6',
+        messages: [{ role: 'user', content: 'hello claude oauth' }],
+      },
+      downstreamFormat: 'openai',
+    });
+
+    expect(request.path).toBe('/v1/messages');
+    expect(request.headers.Authorization).toBe('Bearer oauth-access-token');
+    expect(request.headers['x-api-key']).toBeUndefined();
+  });
+
+  it('converts system roles to developer in native codex responses bodies', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.4',
+      stream: false,
+      tokenValue: 'oauth-access-token',
+      sitePlatform: 'codex',
+      siteUrl: 'https://chatgpt.com/backend-api/codex',
+      openaiBody: {},
+      downstreamFormat: 'responses',
+      responsesOriginalBody: {
+        model: 'gpt-5.4',
+        input: [
+          {
+            type: 'message',
+            role: 'system',
+            content: [{ type: 'input_text', text: 'be careful' }],
+          },
+          {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'hello' }],
+          },
+        ],
+      },
+    });
+
+    expect(request.body.input).toEqual([
+      {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'be careful' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'hello' }],
+      },
+    ]);
   });
 
   it('normalizes downstream responses input string before forwarding upstream', () => {

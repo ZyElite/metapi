@@ -6,11 +6,18 @@ import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
 import { parseProxyUsage } from '../../services/proxyUsageParser.js';
 import { isModelAllowedByPolicyOrAllowedRoutes } from '../../services/downstreamApiKeyService.js';
 import { tokenRouter } from '../../services/tokenRouter.js';
+import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
+import { getOauthInfoFromExtraConfig } from '../../services/oauth/oauthAccount.js';
 import { getDownstreamRoutingPolicy } from './downstreamPolicy.js';
 import { composeProxyLogMessage } from './logPathMeta.js';
 import {
   geminiGenerateContentTransformer,
 } from '../../transformers/gemini/generate-content/index.js';
+import {
+  createGeminiCliStreamReader,
+  unwrapGeminiCliPayload,
+  wrapGeminiCliRequest,
+} from './geminiCliCompat.js';
 
 const MAX_RETRIES = 2;
 const GEMINI_MODEL_PROBES = [
@@ -19,11 +26,33 @@ const GEMINI_MODEL_PROBES = [
   'gemini-1.5-flash',
   'gemini-pro',
 ];
+const GEMINI_CLI_STATIC_MODELS = [
+  { name: 'models/gemini-2.5-pro', displayName: 'Gemini 2.5 Pro' },
+  { name: 'models/gemini-2.5-flash', displayName: 'Gemini 2.5 Flash' },
+  { name: 'models/gemini-2.5-flash-lite', displayName: 'Gemini 2.5 Flash Lite' },
+  { name: 'models/gemini-3-pro-preview', displayName: 'Gemini 3 Pro Preview' },
+  { name: 'models/gemini-3.1-pro-preview', displayName: 'Gemini 3.1 Pro Preview' },
+  { name: 'models/gemini-3-flash-preview', displayName: 'Gemini 3 Flash Preview' },
+  { name: 'models/gemini-3.1-flash-lite-preview', displayName: 'Gemini 3.1 Flash Lite Preview' },
+];
 const EMPTY_PROXY_USAGE = {
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
 };
+
+function isGeminiCliPlatform(platform: unknown): boolean {
+  return String(platform || '').trim().toLowerCase() === 'gemini-cli';
+}
+
+function buildGeminiCliActionPath(input: {
+  isStreamAction: boolean;
+  isCountTokensAction: boolean;
+}) {
+  if (input.isCountTokensAction) return '/v1internal:countTokens';
+  if (input.isStreamAction) return '/v1internal:streamGenerateContent?alt=sse';
+  return '/v1internal:generateContent';
+}
 
 async function selectGeminiChannel(request: FastifyRequest) {
   const policy = getDownstreamRoutingPolicy(request);
@@ -165,6 +194,14 @@ export async function geminiProxyRoute(app: FastifyInstance) {
       excludeChannelIds.push(selected.channel.id);
 
       try {
+        if (isGeminiCliPlatform(selected.site.platform)) {
+          const filtered = await filterGeminiListedModelsForPolicy(
+            { models: GEMINI_CLI_STATIC_MODELS },
+            request,
+          );
+          return reply.code(200).send(filtered);
+        }
+
         const upstream = await fetch(
           geminiGenerateContentTransformer.resolveModelsUrl(selected.site.url, apiVersion, selected.tokenValue),
           { method: 'GET' },
@@ -212,6 +249,7 @@ export async function geminiProxyRoute(app: FastifyInstance) {
       params: request.params as { geminiApiVersion?: string } | undefined,
     });
     const { apiVersion, modelActionPath, isStreamAction, requestedModel } = parsedPath;
+    const isCountTokensAction = modelActionPath.endsWith(':countTokens');
     if (!requestedModel) {
       return reply.code(400).send({
         error: { message: 'Gemini model path is required', type: 'invalid_request_error' },
@@ -240,31 +278,72 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         request.body || {},
         selected.actualModel || requestedModel,
       );
-
+      const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
+      const isGeminiCli = isGeminiCliPlatform(selected.site.platform);
+      if (isGeminiCli && !oauth?.projectId) {
+        lastStatus = 500;
+        lastContentType = 'application/json';
+        lastText = JSON.stringify({
+          error: {
+            message: 'Gemini CLI OAuth project is missing',
+            type: 'server_error',
+          },
+        });
+        await tokenRouter.recordFailure?.(selected.channel.id);
+        if (retryCount < MAX_RETRIES) {
+          retryCount += 1;
+          continue;
+        }
+        return reply.code(lastStatus).type(lastContentType).send(lastText);
+      }
       const actualModelAction = modelActionPath.replace(
         /^models\/[^:]+/,
         `models/${selected.actualModel || requestedModel}`,
       );
-      const upstreamPath = resolveUpstreamPath(apiVersion, actualModelAction);
+      const upstreamPath = isGeminiCli
+        ? buildGeminiCliActionPath({ isStreamAction, isCountTokensAction })
+        : resolveUpstreamPath(apiVersion, actualModelAction);
       const query = new URLSearchParams(request.query as Record<string, string>).toString();
+      const requestBody = isGeminiCli
+        ? (
+          isCountTokensAction
+            ? { request: body }
+            : wrapGeminiCliRequest({
+              modelName: selected.actualModel || requestedModel,
+              projectId: oauth?.projectId || '',
+              request: body as Record<string, unknown>,
+            })
+        )
+        : body;
+      const requestHeaders = isGeminiCli
+        ? {
+          'Content-Type': 'application/json',
+          ...(isStreamAction ? { Accept: 'text/event-stream' } : {}),
+          Authorization: `Bearer ${selected.tokenValue}`,
+          ...buildOauthProviderHeaders({
+            extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
+            downstreamHeaders: request.headers as Record<string, unknown>,
+          }),
+        }
+        : {
+          'Content-Type': 'application/json',
+        };
       const startTime = Date.now();
       try {
-        const upstream = await fetch(
-          geminiGenerateContentTransformer.resolveActionUrl(
+        const targetUrl = isGeminiCli
+          ? `${selected.site.url}${upstreamPath}`
+          : geminiGenerateContentTransformer.resolveActionUrl(
             selected.site.url,
             apiVersion,
             actualModelAction,
             selected.tokenValue,
             query,
-          ),
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(body),
-          },
-        );
+          );
+        const upstream = await fetch(targetUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          body: JSON.stringify(requestBody),
+        });
         const contentType = upstream.headers.get('content-type') || 'application/json';
         if (!upstream.ok) {
           lastStatus = upstream.status;
@@ -298,7 +377,10 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           reply.hijack();
           reply.raw.statusCode = upstream.status;
           reply.raw.setHeader('Content-Type', contentType || 'text/event-stream');
-          const reader = upstream.body?.getReader();
+          const upstreamReader = upstream.body?.getReader();
+          const reader = isGeminiCliPlatform(selected.site.platform) && upstreamReader
+            ? createGeminiCliStreamReader(upstreamReader)
+            : upstreamReader;
           if (!reader) {
             const latency = Date.now() - startTime;
             await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);
@@ -373,11 +455,14 @@ export async function geminiProxyRoute(app: FastifyInstance) {
         let parsedUsage = EMPTY_PROXY_USAGE;
         try {
           const parsed = JSON.parse(text);
-          const responsePayload = geminiGenerateContentTransformer.stream.serializeUpstreamJsonPayload(
-            aggregateState,
-            parsed,
-            isStreamAction,
-          );
+          const unwrappedPayload = unwrapGeminiCliPayload(parsed);
+          const responsePayload = isCountTokensAction
+            ? unwrappedPayload
+            : geminiGenerateContentTransformer.stream.serializeUpstreamJsonPayload(
+              aggregateState,
+              unwrappedPayload,
+              isStreamAction,
+            );
           parsedUsage = parseProxyUsage(aggregateState);
           const latency = Date.now() - startTime;
           await tokenRouter.recordSuccess?.(selected.channel.id, latency, 0);

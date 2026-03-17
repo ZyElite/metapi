@@ -102,19 +102,25 @@ function hasCredentialValue(value: string | null | undefined): boolean {
 
 export function supportsDirectAccountRoutingConnection(account: DirectAccountRoutingInput): boolean {
   const credentialMode = getCredentialModeFromExtraConfig(account.extraConfig);
+  if (hasOauthProvider(account.extraConfig)) {
+    return hasCredentialValue(account.accessToken) || hasCredentialValue(account.apiToken);
+  }
   if (credentialMode === 'apikey') {
     return hasCredentialValue(account.apiToken);
   }
-  if (hasOauthProvider(account.extraConfig)) {
-    return hasCredentialValue(account.accessToken);
+  if (credentialMode === 'session') {
+    return false;
   }
-  return false;
+  if (hasCredentialValue(account.accessToken)) return false;
+  return hasCredentialValue(account.apiToken);
 }
 
 export function requiresManagedAccountTokens(account: DirectAccountRoutingInput): boolean {
   const credentialMode = getCredentialModeFromExtraConfig(account.extraConfig);
-  if (credentialMode === 'apikey') return false;
   if (hasOauthProvider(account.extraConfig)) return false;
+  if (credentialMode === 'apikey') return false;
+  if (credentialMode === 'session') return true;
+  if (hasCredentialValue(account.apiToken) && !hasCredentialValue(account.accessToken)) return false;
   return true;
 }
 

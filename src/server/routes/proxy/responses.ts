@@ -28,9 +28,15 @@ import {
   resolveResponsesBodyInputFiles,
 } from '../../services/proxyInputFileResolver.js';
 import {
-  buildCodexOauthProviderHeaders,
-  refreshCodexOauthAccessToken,
+  buildOauthProviderHeaders,
 } from '../../services/oauth/service.js';
+import { getOauthInfoFromExtraConfig } from '../../services/oauth/oauthAccount.js';
+import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
+import { collectResponsesFinalPayloadFromSse } from './responsesSseFinal.js';
+import {
+  createGeminiCliStreamReader,
+  unwrapGeminiCliPayload,
+} from './geminiCliCompat.js';
 
 const MAX_RETRIES = 2;
 
@@ -180,6 +186,8 @@ export async function responsesProxyRoute(app: FastifyInstance) {
       excludeChannelIds.push(selected.channel.id);
 
       const modelName = selected.actualModel || requestedModel;
+      const oauth = getOauthInfoFromExtraConfig(selected.account.extraConfig);
+      const isCodexSite = String(selected.site.platform || '').trim().toLowerCase() === 'codex';
       const owner = getProxyResourceOwner(request);
       let normalizedResponsesBody: Record<string, unknown> = {
         ...requestEnvelope.parsed.normalizedBody,
@@ -233,19 +241,20 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         endpointCandidates.push('responses', 'chat', 'messages');
       }
       const buildProviderHeaders = () => (
-        String(selected.site.platform || '').trim().toLowerCase() === 'codex'
-          ? buildCodexOauthProviderHeaders({
-            extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
-            downstreamHeaders: request.headers as Record<string, unknown>,
-          })
-          : {}
+        buildOauthProviderHeaders({
+          extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
+          downstreamHeaders: request.headers as Record<string, unknown>,
+        })
       );
       const buildEndpointRequest = (endpoint: 'chat' | 'messages' | 'responses') => {
+        const upstreamStream = isStream || (isCodexSite && endpoint === 'responses');
         const endpointRequest = buildUpstreamEndpointRequest({
           endpoint,
           modelName,
-          stream: isStream,
+          stream: upstreamStream,
           tokenValue: selected.tokenValue,
+          oauthProvider: oauth?.provider,
+          oauthProjectId: oauth?.projectId,
           sitePlatform: selected.site.platform,
           siteUrl: selected.site.url,
           openaiBody: openAiBody,
@@ -267,7 +276,7 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         };
       };
       const endpointStrategy = openAiResponsesTransformer.compatibility.createEndpointStrategy({
-        isStream,
+        isStream: isStream || isCodexSite,
         requiresNativeResponsesFileUrl,
         dispatchRequest: (compatibilityRequest, targetUrl) => fetch(
           targetUrl ?? `${selected.site.url}${compatibilityRequest.path}`,
@@ -279,33 +288,37 @@ export async function responsesProxyRoute(app: FastifyInstance) {
         ),
       });
       const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {
-        if (ctx.response.status === 401 && String(selected.site.platform || '').trim().toLowerCase() === 'codex') {
-          const refreshed = await refreshCodexOauthAccessToken(selected.account.id);
-          selected.tokenValue = refreshed.accessToken;
-          selected.account = {
-            ...selected.account,
-            accessToken: refreshed.accessToken,
-            extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
-          };
-          const refreshedRequest = buildEndpointRequest(ctx.request.endpoint);
-          const refreshedTargetUrl = `${selected.site.url}${refreshedRequest.path}`;
-          const refreshedResponse = await fetch(
-            refreshedTargetUrl,
-            withSiteRecordProxyRequestInit(selected.site, {
-              method: 'POST',
-              headers: refreshedRequest.headers,
-              body: JSON.stringify(refreshedRequest.body),
-            }),
-          );
-          if (refreshedResponse.ok) {
-            return {
-              upstream: refreshedResponse,
-              upstreamPath: refreshedRequest.path,
+        if (ctx.response.status === 401 && oauth) {
+          try {
+            const refreshed = await refreshOauthAccessTokenSingleflight(selected.account.id);
+            selected.tokenValue = refreshed.accessToken;
+            selected.account = {
+              ...selected.account,
+              accessToken: refreshed.accessToken,
+              extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
             };
+            const refreshedRequest = buildEndpointRequest(ctx.request.endpoint);
+            const refreshedTargetUrl = `${selected.site.url}${refreshedRequest.path}`;
+            const refreshedResponse = await fetch(
+              refreshedTargetUrl,
+              withSiteRecordProxyRequestInit(selected.site, {
+                method: 'POST',
+                headers: refreshedRequest.headers,
+                body: JSON.stringify(refreshedRequest.body),
+              }),
+            );
+            if (refreshedResponse.ok) {
+              return {
+                upstream: refreshedResponse,
+                upstreamPath: refreshedRequest.path,
+              };
+            }
+            ctx.request = refreshedRequest;
+            ctx.response = refreshedResponse;
+            ctx.rawErrText = await refreshedResponse.text().catch(() => 'unknown error');
+          } catch {
+            return endpointStrategy.tryRecover(ctx);
           }
-          ctx.request = refreshedRequest;
-          ctx.response = refreshedResponse;
-          ctx.rawErrText = await refreshedResponse.text().catch(() => 'unknown error');
         }
         return endpointStrategy.tryRecover(ctx);
       };
@@ -386,8 +399,8 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           return reply.code(status).send({ error: { message: errText, type: 'upstream_error' } });
         }
 
-        const upstream = endpointResult.upstream;
-        const successfulUpstreamPath = endpointResult.upstreamPath;
+      const upstream = endpointResult.upstream;
+      const successfulUpstreamPath = endpointResult.upstreamPath;
 
         if (isStream) {
           reply.hijack();
@@ -397,7 +410,10 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           reply.raw.setHeader('Connection', 'keep-alive');
           reply.raw.setHeader('X-Accel-Buffering', 'no');
 
-          const reader = upstream.body?.getReader();
+          const upstreamReader = upstream.body?.getReader();
+          const reader = String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli' && upstreamReader
+            ? createGeminiCliStreamReader(upstreamReader)
+            : upstreamReader;
           let parsedUsage: UsageSummary = {
             promptTokens: 0,
             completionTokens: 0,
@@ -460,12 +476,24 @@ export async function responsesProxyRoute(app: FastifyInstance) {
           return;
         }
 
-        const rawText = await upstream.text();
-        let upstreamData: unknown = rawText;
-        try {
-          upstreamData = JSON.parse(rawText);
-        } catch {
+        const upstreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+        let rawText = '';
+        let upstreamData: unknown;
+        if (upstreamContentType.includes('text/event-stream') && successfulUpstreamPath.endsWith('/responses')) {
+          const collected = await collectResponsesFinalPayloadFromSse(upstream, modelName);
+          rawText = collected.rawText;
+          upstreamData = collected.payload;
+        } else {
+          rawText = await upstream.text();
           upstreamData = rawText;
+          try {
+            upstreamData = JSON.parse(rawText);
+          } catch {
+            upstreamData = rawText;
+          }
+        }
+        if (String(selected.site.platform || '').trim().toLowerCase() === 'gemini-cli') {
+          upstreamData = unwrapGeminiCliPayload(upstreamData);
         }
         const latency = Date.now() - startTime;
         const parsedUsage = parseProxyUsage(upstreamData);
