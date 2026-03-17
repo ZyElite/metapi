@@ -32,6 +32,10 @@ import {
   hasNonImageFileInputInOpenAiBody,
   resolveOpenAiBodyInputFiles,
 } from '../../services/proxyInputFileResolver.js';
+import {
+  buildCodexOauthProviderHeaders,
+  refreshCodexOauthAccessToken,
+} from '../../services/oauth/service.js';
 
 const MAX_RETRIES = 2;
 
@@ -130,6 +134,14 @@ async function handleChatProxyRequest(
         },
       ),
     ];
+    const buildProviderHeaders = () => (
+      String(selected.site.platform || '').trim().toLowerCase() === 'codex'
+        ? buildCodexOauthProviderHeaders({
+          extraConfig: typeof selected.account.extraConfig === 'string' ? selected.account.extraConfig : null,
+          downstreamHeaders: request.headers as Record<string, unknown>,
+        })
+        : {}
+    );
     const buildEndpointRequest = (
       endpoint: 'chat' | 'messages' | 'responses',
       options: { forceNormalizeClaudeBody?: boolean } = {},
@@ -146,6 +158,7 @@ async function handleChatProxyRequest(
         claudeOriginalBody,
         forceNormalizeClaudeBody: options.forceNormalizeClaudeBody,
         downstreamHeaders: request.headers as Record<string, unknown>,
+        providerHeaders: buildProviderHeaders(),
       });
       return {
         endpoint,
@@ -174,17 +187,48 @@ async function handleChatProxyRequest(
         }),
       ),
     });
+    const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {
+      if (ctx.response.status === 401 && String(selected.site.platform || '').trim().toLowerCase() === 'codex') {
+        const refreshed = await refreshCodexOauthAccessToken(selected.account.id);
+        selected.tokenValue = refreshed.accessToken;
+        selected.account = {
+          ...selected.account,
+          accessToken: refreshed.accessToken,
+          extraConfig: refreshed.extraConfig ?? selected.account.extraConfig,
+        };
+        const refreshedRequest = buildEndpointRequest(ctx.request.endpoint);
+        const refreshedTargetUrl = `${selected.site.url}${refreshedRequest.path}`;
+        const refreshedResponse = await fetch(
+          refreshedTargetUrl,
+          withSiteRecordProxyRequestInit(selected.site, {
+            method: 'POST',
+            headers: refreshedRequest.headers,
+            body: JSON.stringify(refreshedRequest.body),
+          }),
+        );
+        if (refreshedResponse.ok) {
+          return {
+            upstream: refreshedResponse,
+            upstreamPath: refreshedRequest.path,
+          };
+        }
+        ctx.request = refreshedRequest;
+        ctx.response = refreshedResponse;
+        ctx.rawErrText = await refreshedResponse.text().catch(() => 'unknown error');
+      }
+      return endpointStrategy.tryRecover(ctx);
+    };
     let startTime = Date.now();
 
     try {
-      const endpointResult = await executeEndpointFlow({
-        siteUrl: selected.site.url,
-        proxyUrl: resolveProxyUrlForSite(selected.site),
-        endpointCandidates,
-        buildRequest: (endpoint) => buildEndpointRequest(endpoint),
-        tryRecover: endpointStrategy.tryRecover,
-        shouldDowngrade: endpointStrategy.shouldDowngrade,
-        onDowngrade: (ctx) => {
+        const endpointResult = await executeEndpointFlow({
+          siteUrl: selected.site.url,
+          proxyUrl: resolveProxyUrlForSite(selected.site),
+          endpointCandidates,
+          buildRequest: (endpoint) => buildEndpointRequest(endpoint),
+          tryRecover,
+          shouldDowngrade: endpointStrategy.shouldDowngrade,
+          onDowngrade: (ctx) => {
           logProxy(
             selected,
             requestedModel,

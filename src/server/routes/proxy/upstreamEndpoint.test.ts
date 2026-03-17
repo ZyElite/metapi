@@ -151,6 +151,16 @@ describe('resolveUpstreamEndpointCandidates', () => {
       'claude',
     );
     expect(claudeOrder).toEqual(['messages']);
+
+    const codexOrder = await resolveUpstreamEndpointCandidates(
+      {
+        ...baseContext,
+        site: { ...baseContext.site, platform: 'codex', url: 'https://chatgpt.com/backend-api/codex' },
+      },
+      'gpt-5.2-codex',
+      'openai',
+    );
+    expect(codexOrder).toEqual(['responses']);
   });
 
   it('prefers document-capable endpoints when downstream content contains non-image files', async () => {
@@ -317,6 +327,31 @@ describe('buildUpstreamEndpointRequest', () => {
         content: [{ type: 'input_text', text: 'hello' }],
       },
     ]);
+  });
+
+  it('builds codex responses requests against backend-api path and preserves oauth provider headers', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.2-codex',
+      stream: false,
+      tokenValue: 'oauth-access-token',
+      sitePlatform: 'codex',
+      siteUrl: 'https://chatgpt.com/backend-api/codex',
+      openaiBody: {
+        model: 'gpt-5.2-codex',
+        messages: [{ role: 'user', content: 'hello codex' }],
+      },
+      downstreamFormat: 'openai',
+      providerHeaders: {
+        Originator: 'codex_cli_rs',
+        'Chatgpt-Account-Id': 'chatgpt-account-123',
+      },
+    } as any);
+
+    expect(request.path).toBe('/responses');
+    expect(request.headers.Authorization).toBe('Bearer oauth-access-token');
+    expect(request.headers.Originator).toBe('codex_cli_rs');
+    expect(request.headers['Chatgpt-Account-Id']).toBe('chatgpt-account-123');
   });
 
   it('normalizes downstream responses input string before forwarding upstream', () => {

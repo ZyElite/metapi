@@ -186,6 +186,18 @@ function toFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function ensureCodexResponsesInstructions(
+  body: Record<string, unknown>,
+  sitePlatform: string,
+): Record<string, unknown> {
+  if (sitePlatform !== 'codex') return body;
+  if (typeof body.instructions === 'string') return body;
+  return {
+    ...body,
+    instructions: '',
+  };
+}
+
 
 function normalizeEndpointTypes(value: unknown): UpstreamEndpoint[] {
   const raw = asTrimmedString(value).toLowerCase();
@@ -236,6 +248,10 @@ function preferredEndpointOrder(
   preferMessagesForClaudeModel = false,
 ): UpstreamEndpoint[] {
   const platform = normalizePlatformName(sitePlatform);
+
+  if (platform === 'codex') {
+    return ['responses'];
+  }
 
   if (platform === 'gemini') {
     // Gemini upstream is routed through OpenAI-compatible chat endpoint.
@@ -430,6 +446,7 @@ export function buildUpstreamEndpointRequest(input: {
   forceNormalizeClaudeBody?: boolean;
   responsesOriginalBody?: Record<string, unknown>;
   downstreamHeaders?: Record<string, unknown>;
+  providerHeaders?: Record<string, string>;
 }): {
   path: string;
   headers: Record<string, string>;
@@ -463,6 +480,10 @@ export function buildUpstreamEndpointRequest(input: {
       return '/v1/chat/completions';
     }
 
+    if (sitePlatform === 'codex') {
+      return '/responses';
+    }
+
     if (sitePlatform === 'claude') {
       return '/v1/messages';
     }
@@ -476,6 +497,7 @@ export function buildUpstreamEndpointRequest(input: {
   const commonHeaders: Record<string, string> = {
     ...passthroughHeaders,
     'Content-Type': 'application/json',
+    ...(input.providerHeaders || {}),
   };
   if (!isClaudeUpstream) {
     commonHeaders.Authorization = `Bearer ${input.tokenValue}`;
@@ -564,7 +586,10 @@ export function buildUpstreamEndpointRequest(input: {
         }
         : convertOpenAiBodyToResponsesBodyViaTransformer(openaiBody, input.modelName, input.stream)
     );
-    const body = sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream);
+    const body = ensureCodexResponsesInstructions(
+      sanitizeResponsesBodyForProxyViaTransformer(rawBody, input.modelName, input.stream),
+      sitePlatform,
+    );
 
     const headers = ensureStreamAcceptHeader({
       ...commonHeaders,
