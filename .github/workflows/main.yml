@@ -1,0 +1,70 @@
+name: Build Metapi Windows
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    env:
+      NODE_VERSION: 22
+
+    steps:
+      # 1️⃣ 拉代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2️⃣ Node 环境
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # 3️⃣ Rust（Tauri 必须）
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 4️⃣ 安装 Tauri CLI
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli
+
+      # 5️⃣ 安装依赖
+      - name: Install dependencies
+        run: npm install
+
+      # 6️⃣ 数据库迁移（⚠️ 很关键）
+      - name: Run DB migration
+        run: npm run db:migrate
+
+      # 7️⃣ 构建前后端
+      - name: Build app (web + server)
+        run: npm run build
+
+      # 8️⃣ 构建 Windows 桌面包（Tauri）
+      - name: Build Windows Desktop
+        run: |
+          if (Test-Path package.json) {
+            npm run tauri build
+          }
+
+      # 9️⃣ 上传产物
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: metapi-windows
+          path: |
+            src-tauri/target/release/bundle/**
+            dist/**
+            
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          files: |
+            src-tauri/target/release/bundle/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
