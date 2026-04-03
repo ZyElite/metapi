@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
 
     env:
-      NODE_VERSION: 22
+      NODE_VERSION: 25
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       # 1️⃣ 拉代码
@@ -25,12 +25,12 @@ jobs:
           cache: npm
 
       # 3️⃣ Rust（Tauri 必须）
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      #- name: Setup Rust
+      #  uses: dtolnay/rust-toolchain@stable
 
       # 4️⃣ 安装 Tauri CLI
-      - name: Install Tauri CLI
-        run: npm install -g @tauri-apps/cli
+      #- name: Install Tauri CLI
+      #  run: npm install -g @tauri-apps/cli
 
       # 5️⃣ 安装依赖
       - name: Install dependencies
@@ -46,10 +46,7 @@ jobs:
 
       # 8️⃣ 构建 Windows 桌面包（Tauri）
       - name: Build Windows Desktop
-        run: |
-          if (Test-Path package.json) {
-            npm run tauri build
-          }
+        run: npm run dist:desktop
 
       # 9️⃣ 上传产物
       - name: Upload artifacts
