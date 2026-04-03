@@ -49,19 +49,17 @@ jobs:
         run: npm run dist:desktop
 
       # 9️⃣ 上传产物
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: metapi-windows
-          path: |
-            src-tauri/target/release/bundle/**
-            dist/**
+          path: release/**
             
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
+          tag_name: v1.3.${{ github.run_id  }}
           files: |
-            src-tauri/target/release/bundle/**/*
+              release/*.exe
+              release/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
