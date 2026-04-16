@@ -41,11 +41,11 @@ describe('downstream api keys routes', () => {
   });
 
   it('builds postgres trend buckets by casting text timestamps before date_trunc', async () => {
-    const routesModule = await import('./downstreamApiKeys.js') as Record<string, any>;
+    const trendServiceModule = await import('../../services/downstreamApiKeyTrendService.js') as Record<string, any>;
 
-    expect(typeof routesModule.buildBucketTsExpressionForDialect).toBe('function');
+    expect(typeof trendServiceModule.buildBucketTsExpressionForDialect).toBe('function');
 
-    const expression = routesModule.buildBucketTsExpressionForDialect('postgres', schema.proxyLogs.createdAt, 3600);
+    const expression = trendServiceModule.buildBucketTsExpressionForDialect('postgres', schema.proxyLogs.createdAt, 3600);
     const rendered = new PgDialect().sqlToQuery(expression).sql;
 
     expect(rendered).toContain('date_trunc');
@@ -222,6 +222,198 @@ describe('downstream api keys routes', () => {
       maxCost: null,
       maxRequests: null,
     });
+  });
+
+  it('roundtrips excluded sites and excluded credentials through create, update, and list', async () => {
+    const siteA = await db.insert(schema.sites).values({
+      name: 'site-a',
+      url: 'https://site-a.example.com',
+      status: 'active',
+      platform: 'new-api',
+    }).returning().get();
+    const siteB = await db.insert(schema.sites).values({
+      name: 'site-b',
+      url: 'https://site-b.example.com',
+      status: 'active',
+      platform: 'new-api',
+    }).returning().get();
+
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: siteA.id,
+      username: 'account-a',
+      accessToken: 'access-a',
+      apiToken: 'sk-default-a',
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: siteB.id,
+      username: 'account-b',
+      accessToken: 'access-b',
+      apiToken: 'sk-default-b',
+      status: 'active',
+    }).returning().get();
+
+    const tokenA = await db.insert(schema.accountTokens).values({
+      accountId: accountA.id,
+      name: 'token-a',
+      token: 'sk-token-a',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const route = await db.insert(schema.tokenRoutes).values({
+      modelPattern: 'gpt-5.2',
+      displayName: 'portal-route',
+      enabled: true,
+    }).returning().get();
+
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/api/downstream-keys',
+      payload: {
+        name: 'exclude-key',
+        key: 'sk-exclude-key-001',
+        allowedRouteIds: [route.id],
+        excludedSiteIds: [siteB.id],
+        excludedCredentialRefs: [
+          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+        ],
+      },
+    });
+
+    expect(createRes.statusCode).toBe(200);
+    expect(createRes.json()).toMatchObject({
+      success: true,
+      item: {
+        excludedSiteIds: [siteB.id],
+        excludedCredentialRefs: [
+          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+        ],
+      },
+    });
+
+    const keyId = createRes.json().item.id as number;
+    const updateRes = await app.inject({
+      method: 'PUT',
+      url: `/api/downstream-keys/${keyId}`,
+      payload: {
+        excludedSiteIds: [siteB.id, siteA.id, siteB.id],
+        excludedCredentialRefs: [
+          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+        ],
+      },
+    });
+
+    expect(updateRes.statusCode).toBe(200);
+    expect(updateRes.json()).toMatchObject({
+      success: true,
+      item: {
+        excludedSiteIds: [siteA.id, siteB.id],
+        excludedCredentialRefs: [
+          { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+        ],
+      },
+    });
+
+    const listRes = await app.inject({
+      method: 'GET',
+      url: '/api/downstream-keys',
+    });
+
+    expect(listRes.statusCode).toBe(200);
+    expect(listRes.json()).toMatchObject({
+      success: true,
+      items: [
+        expect.objectContaining({
+          id: keyId,
+          excludedSiteIds: [siteA.id, siteB.id],
+          excludedCredentialRefs: [
+            { kind: 'account_token', siteId: siteA.id, accountId: accountA.id, tokenId: tokenA.id },
+            { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+          ],
+        }),
+      ],
+    });
+  });
+
+  it('rejects unknown or mismatched exclusion references', async () => {
+    const siteA = await db.insert(schema.sites).values({
+      name: 'site-a',
+      url: 'https://site-a.example.com',
+      status: 'active',
+      platform: 'new-api',
+    }).returning().get();
+    const siteB = await db.insert(schema.sites).values({
+      name: 'site-b',
+      url: 'https://site-b.example.com',
+      status: 'active',
+      platform: 'new-api',
+    }).returning().get();
+    const accountA = await db.insert(schema.accounts).values({
+      siteId: siteA.id,
+      username: 'account-a',
+      accessToken: 'access-a',
+      apiToken: 'sk-default-a',
+      status: 'active',
+    }).returning().get();
+    const accountB = await db.insert(schema.accounts).values({
+      siteId: siteB.id,
+      username: 'account-b',
+      accessToken: 'access-b',
+      apiToken: null,
+      status: 'active',
+    }).returning().get();
+    const tokenA = await db.insert(schema.accountTokens).values({
+      accountId: accountA.id,
+      name: 'token-a',
+      token: 'sk-token-a',
+      enabled: true,
+      isDefault: true,
+      valueStatus: 'ready',
+    }).returning().get();
+
+    const unknownSiteRes = await app.inject({
+      method: 'POST',
+      url: '/api/downstream-keys',
+      payload: {
+        name: 'bad-site',
+        key: 'sk-bad-site-001',
+        excludedSiteIds: [999999],
+      },
+    });
+    expect(unknownSiteRes.statusCode).toBe(400);
+
+    const mismatchedTokenRes = await app.inject({
+      method: 'POST',
+      url: '/api/downstream-keys',
+      payload: {
+        name: 'bad-token',
+        key: 'sk-bad-token-001',
+        excludedCredentialRefs: [
+          { kind: 'account_token', siteId: siteB.id, accountId: accountA.id, tokenId: tokenA.id },
+        ],
+      },
+    });
+    expect(mismatchedTokenRes.statusCode).toBe(400);
+
+    const missingDefaultApiKeyRes = await app.inject({
+      method: 'POST',
+      url: '/api/downstream-keys',
+      payload: {
+        name: 'bad-default',
+        key: 'sk-bad-default-001',
+        excludedCredentialRefs: [
+          { kind: 'default_api_key', siteId: siteB.id, accountId: accountB.id },
+        ],
+      },
+    });
+    expect(missingDefaultApiKeyRes.statusCode).toBe(400);
   });
 
   it('supports batch enable/disable/reset/delete operations', async () => {
@@ -595,6 +787,71 @@ describe('downstream api keys routes', () => {
     expect(trendBody.buckets.some((bucket: any) => bucket.totalTokens === 900)).toBe(true);
   });
 
+  it('groups all-range trend buckets by local day boundaries', async () => {
+    const inserted = await db.insert(schema.downstreamApiKeys).values({
+      name: 'local-day-key',
+      key: 'sk-local-day-key-001',
+      enabled: true,
+      description: 'local day trend',
+      usedCost: 0,
+      usedRequests: 0,
+    }).returning().get();
+
+    await db.insert(schema.proxyLogs).values([
+      {
+        downstreamApiKeyId: inserted.id,
+        status: 'success',
+        totalTokens: 100,
+        estimatedCost: 0.01,
+        createdAt: '2026-04-05T23:30:00.000Z',
+      },
+      {
+        downstreamApiKeyId: inserted.id,
+        status: 'failed',
+        totalTokens: 200,
+        estimatedCost: 0.02,
+        createdAt: '2026-04-06T01:00:00.000Z',
+      },
+      {
+        downstreamApiKeyId: inserted.id,
+        status: 'success',
+        totalTokens: 300,
+        estimatedCost: 0.03,
+        createdAt: '2026-04-06T16:30:00.000Z',
+      },
+    ]).run();
+
+    const trendRes = await app.inject({
+      method: 'GET',
+      url: `/api/downstream-keys/${inserted.id}/trend?range=all&timeZone=${encodeURIComponent('Asia/Shanghai')}`,
+    });
+
+    expect(trendRes.statusCode).toBe(200);
+    expect(trendRes.json()).toMatchObject({
+      success: true,
+      range: 'all',
+      timeZone: 'Asia/Shanghai',
+      buckets: [
+        {
+          startUtc: '2026-04-05T16:00:00.000Z',
+          totalRequests: 2,
+          successRequests: 1,
+          failedRequests: 1,
+          totalTokens: 300,
+          totalCost: 0.03,
+        },
+        {
+          startUtc: '2026-04-06T16:00:00.000Z',
+          totalRequests: 1,
+          successRequests: 1,
+          failedRequests: 0,
+          totalTokens: 300,
+          totalCost: 0.03,
+        },
+      ],
+    });
+  });
+
   it('rejects unknown route ids and site ids in downstream policy payloads', async () => {
     const createRes = await app.inject({
       method: 'POST',
@@ -644,7 +901,7 @@ describe('downstream api keys routes', () => {
     expect(updateRes.statusCode).toBe(400);
     expect(updateRes.json()).toMatchObject({
       success: false,
-      message: 'siteWeightMultipliers 包含不存在的站点: 999',
+      message: '策略中包含不存在的站点: 999',
     });
 
     const filteredSummaryRes = await app.inject({

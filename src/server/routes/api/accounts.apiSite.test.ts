@@ -62,14 +62,14 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
 
     const site = await db.insert(schema.sites).values({
       name: 'Nihao Panel',
-      url: 'https://nih.cc',
+      url: 'https://console.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
     await db.insert(schema.siteApiEndpoints).values({
       siteId: site.id,
-      url: 'https://api.nih.cc',
+      url: 'https://api.example.com',
       enabled: true,
       sortOrder: 0,
     }).run();
@@ -90,7 +90,7 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
       tokenType: 'apikey',
       modelCount: 1,
     });
-    expect(getModelsMock).toHaveBeenCalledWith('https://api.nih.cc', 'sk-nihao', undefined);
+    expect(getModelsMock).toHaveBeenCalledWith('https://api.example.com', 'sk-nihao', undefined);
     expect(verifyTokenMock).not.toHaveBeenCalled();
   });
 
@@ -101,7 +101,7 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
 
     const site = await db.insert(schema.sites).values({
       name: 'Nihao Pool',
-      url: 'https://nih.cc',
+      url: 'https://console.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
@@ -109,13 +109,13 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
     await db.insert(schema.siteApiEndpoints).values([
       {
         siteId: site.id,
-        url: 'https://api-a.nih.cc',
+        url: 'https://api-a.example.com',
         enabled: true,
         sortOrder: 0,
       },
       {
         siteId: site.id,
-        url: 'https://api-b.nih.cc',
+        url: 'https://api-b.example.com',
         enabled: true,
         sortOrder: 1,
       },
@@ -137,12 +137,12 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
       tokenType: 'apikey',
       modelCount: 1,
     });
-    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api-a.nih.cc', 'sk-rotate', undefined);
-    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api-b.nih.cc', 'sk-rotate', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api-a.example.com', 'sk-rotate', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api-b.example.com', 'sk-rotate', undefined);
 
     const endpoints = await db.select().from(schema.siteApiEndpoints).all();
-    const firstEndpoint = endpoints.find((item) => item.url === 'https://api-a.nih.cc');
-    const secondEndpoint = endpoints.find((item) => item.url === 'https://api-b.nih.cc');
+    const firstEndpoint = endpoints.find((item) => item.url === 'https://api-a.example.com');
+    const secondEndpoint = endpoints.find((item) => item.url === 'https://api-b.example.com');
     expect(firstEndpoint?.cooldownUntil).toBeTruthy();
     expect(firstEndpoint?.lastFailureReason).toContain('HTTP 502');
     expect(secondEndpoint?.lastSelectedAt).toBeTruthy();
@@ -158,14 +158,14 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
 
     const site = await db.insert(schema.sites).values({
       name: 'Nihao Panel',
-      url: 'https://nih.cc',
+      url: 'https://console.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
     await db.insert(schema.siteApiEndpoints).values({
       siteId: site.id,
-      url: 'https://api.nih.cc',
+      url: 'https://api.example.com',
       enabled: true,
       sortOrder: 0,
     }).run();
@@ -186,7 +186,7 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
       tokenType: 'session',
       apiToken: 'sk-derived',
     });
-    expect(verifyTokenMock).toHaveBeenCalledWith('https://nih.cc', 'session-token', undefined);
+    expect(verifyTokenMock).toHaveBeenCalledWith('https://console.example.com', 'session-token', undefined);
     expect(getModelsMock).not.toHaveBeenCalled();
   });
 
@@ -195,14 +195,14 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
 
     const site = await db.insert(schema.sites).values({
       name: 'Nihao Panel',
-      url: 'https://nih.cc',
+      url: 'https://console.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
 
     await db.insert(schema.siteApiEndpoints).values({
       siteId: site.id,
-      url: 'https://api.nih.cc',
+      url: 'https://api.example.com',
       enabled: true,
       sortOrder: 0,
     }).run();
@@ -221,7 +221,7 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
     expect(response.json()).toMatchObject({
       tokenType: 'apikey',
     });
-    expect(getModelsMock).toHaveBeenCalledWith('https://api.nih.cc', 'sk-nihao-create', undefined);
+    expect(getModelsMock).toHaveBeenCalledWith('https://api.example.com', 'sk-nihao-create', undefined);
   });
 
   it('rotates API key account creation across configured ai endpoints after a retryable failure', async () => {
@@ -231,7 +231,7 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
 
     const site = await db.insert(schema.sites).values({
       name: 'Nihao Create Pool',
-      url: 'https://nih.cc',
+      url: 'https://console.example.com',
       platform: 'new-api',
       status: 'active',
     }).returning().get();
@@ -239,13 +239,13 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
     await db.insert(schema.siteApiEndpoints).values([
       {
         siteId: site.id,
-        url: 'https://api-create-a.nih.cc',
+        url: 'https://api-create-a.example.com',
         enabled: true,
         sortOrder: 0,
       },
       {
         siteId: site.id,
-        url: 'https://api-create-b.nih.cc',
+        url: 'https://api-create-b.example.com',
         enabled: true,
         sortOrder: 1,
       },
@@ -265,7 +265,100 @@ describe('accounts api endpoint host selection', { timeout: 15_000 }, () => {
     expect(response.json()).toMatchObject({
       tokenType: 'apikey',
     });
-    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api-create-a.nih.cc', 'sk-nihao-create-rotate', undefined);
-    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api-create-b.nih.cc', 'sk-nihao-create-rotate', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api-create-a.example.com', 'sk-nihao-create-rotate', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api-create-b.example.com', 'sk-nihao-create-rotate', undefined);
+  });
+
+  it('supports batch creating multiple API key connections for one site', async () => {
+    getModelsMock
+      .mockResolvedValueOnce(['gpt-4o-mini'])
+      .mockResolvedValueOnce(['gpt-4.1-mini']);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Nihao Batch Pool',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: {
+        siteId: site.id,
+        username: 'batch-key',
+        accessToken: 'sk-batch-a\nsk-batch-b',
+        credentialMode: 'apikey',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      batch: true,
+      totalCount: 2,
+      createdCount: 2,
+      failedCount: 0,
+    });
+    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api.example.com', 'sk-batch-a', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api.example.com', 'sk-batch-b', undefined);
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map((item) => item.apiToken)).toEqual(['sk-batch-a', 'sk-batch-b']);
+    expect(accounts.map((item) => item.username)).toEqual(['batch-key #1', 'batch-key #2']);
+  });
+
+  it('treats accessTokens payloads as batch API key creation even without credentialMode', async () => {
+    getModelsMock
+      .mockResolvedValueOnce(['gpt-4o-mini'])
+      .mockResolvedValueOnce(['gpt-4.1-mini']);
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Nihao Batch Array',
+      url: 'https://console.example.com',
+      platform: 'new-api',
+      status: 'active',
+    }).returning().get();
+
+    await db.insert(schema.siteApiEndpoints).values({
+      siteId: site.id,
+      url: 'https://api.example.com',
+      enabled: true,
+      sortOrder: 0,
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/accounts',
+      payload: {
+        siteId: site.id,
+        username: 'array-key',
+        accessTokens: ['sk-array-a', 'sk-array-b'],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      batch: true,
+      totalCount: 2,
+      createdCount: 2,
+      failedCount: 0,
+    });
+    expect(getModelsMock).toHaveBeenNthCalledWith(1, 'https://api.example.com', 'sk-array-a', undefined);
+    expect(getModelsMock).toHaveBeenNthCalledWith(2, 'https://api.example.com', 'sk-array-b', undefined);
+
+    const accounts = await db.select().from(schema.accounts).all();
+    expect(accounts).toHaveLength(2);
+    expect(accounts.map((item) => item.apiToken)).toEqual(['sk-array-a', 'sk-array-b']);
+    expect(accounts.map((item) => item.username)).toEqual(['array-key #1', 'array-key #2']);
   });
 });

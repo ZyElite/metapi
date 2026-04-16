@@ -9,12 +9,12 @@ import { isTokenExpiredError } from '../../services/alertRules.js';
 import { shouldRetryProxyRequest } from '../../services/proxyRetryPolicy.js';
 import { composeProxyLogMessage } from '../../routes/proxy/logPathMeta.js';
 import { resolveProxyLogBilling } from '../../routes/proxy/proxyBilling.js';
-import type { DownstreamClientContext } from '../../routes/proxy/downstreamClientContext.js';
+import type { DownstreamClientContext } from '../downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { dispatchRuntimeRequest } from '../../services/runtimeDispatch.js';
 import type { BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
 import { buildUpstreamUrl } from '../orchestration/upstreamRequest.js';
-import { recordOauthQuotaResetHint } from '../../services/oauth/quota.js';
+import { recordOauthQuotaHeadersSnapshot, recordOauthQuotaResetHint } from '../../services/oauth/quota.js';
 import { refreshOauthAccessTokenSingleflight } from '../../services/oauth/refreshSingleflight.js';
 import { proxyChannelCoordinator } from '../../services/proxyChannelCoordinator.js';
 import { readRuntimeResponseText } from '../executors/types.js';
@@ -331,6 +331,7 @@ export async function recordSurfaceSuccess(input: {
   modelName: string;
   parsedUsage: SurfaceUsageSummary;
   upstreamUsagePresent?: boolean;
+  upstreamHeaders?: { get(name: string): string | null } | null;
   requestStartedAtMs: number;
   isStream?: boolean | null;
   firstByteLatencyMs?: number | null;
@@ -451,6 +452,15 @@ export async function recordSurfaceSuccess(input: {
     upstreamPath: input.upstreamPath,
   });
 
+  if (input.upstreamHeaders) {
+    void recordOauthQuotaHeadersSnapshot({
+      accountId: input.selected.account.id,
+      headers: input.upstreamHeaders,
+    }).catch((error) => {
+      console.warn('[proxy/shared] failed to record oauth quota headers', error);
+    });
+  }
+
   return {
     resolvedUsage,
     estimatedCost,
@@ -478,6 +488,7 @@ export function createSurfaceFailureToolkit(input: {
     promptTokens?: number | null;
     completionTokens?: number | null;
     totalTokens?: number | null;
+    usageSource?: 'upstream' | 'self-log' | 'unknown';
     estimatedCost?: number;
     billingDetails?: unknown;
     upstreamPath?: string | null;
@@ -497,6 +508,7 @@ export function createSurfaceFailureToolkit(input: {
       promptTokens: args.promptTokens,
       completionTokens: args.completionTokens,
       totalTokens: args.totalTokens,
+      usageSource: args.usageSource,
       estimatedCost: args.estimatedCost,
       billingDetails: args.billingDetails,
       upstreamPath: args.upstreamPath,

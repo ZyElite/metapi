@@ -696,6 +696,93 @@ describe('buildUpstreamEndpointRequest', () => {
     ]);
   });
 
+  it('applies a sub2api-style allowlist to generic passthrough headers', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'chat',
+      modelName: 'upstream-gpt',
+      stream: false,
+      tokenValue: 'sk-test',
+      sitePlatform: 'sub2api',
+      siteUrl: 'https://example.com',
+      openaiBody: {
+        model: 'gpt-5.2',
+        messages: [{ role: 'user', content: 'hello' }],
+      },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {
+        accept: 'application/json',
+        'accept-language': 'zh-CN',
+        'user-agent': 'client-ua/1.0',
+        originator: 'codex_cli_rs',
+        session_id: 'session-123',
+        conversation_id: 'conversation-123',
+        'x-codex-turn-state': 'turn-state',
+        'x-codex-turn-metadata': 'turn-metadata',
+        origin: 'https://client.example',
+        referer: 'https://client.example/chat',
+        'x-forwarded-for': '203.0.113.1',
+        'x-real-ip': '203.0.113.2',
+        version: '0.202.0',
+        'x-test-header': 'drop-me',
+      },
+    });
+
+    expect(request.headers.accept).toBe('application/json');
+    expect(request.headers['accept-language']).toBe('zh-CN');
+    expect(request.headers['user-agent']).toBe('client-ua/1.0');
+    expect(request.headers.originator).toBe('codex_cli_rs');
+    expect(request.headers.session_id).toBe('session-123');
+    expect(request.headers.conversation_id).toBe('conversation-123');
+    expect(request.headers['x-codex-turn-state']).toBe('turn-state');
+    expect(request.headers['x-codex-turn-metadata']).toBe('turn-metadata');
+
+    expect(request.headers.origin).toBeUndefined();
+    expect(request.headers.referer).toBeUndefined();
+    expect(request.headers['x-forwarded-for']).toBeUndefined();
+    expect(request.headers['x-real-ip']).toBeUndefined();
+    expect(request.headers.version).toBeUndefined();
+    expect(request.headers['x-test-header']).toBeUndefined();
+  });
+
+  it('preserves codex compatibility headers while stripping browser and ip passthrough headers', () => {
+    const request = buildUpstreamEndpointRequest({
+      endpoint: 'responses',
+      modelName: 'gpt-5.2-codex',
+      stream: false,
+      tokenValue: 'oauth-access-token',
+      oauthProvider: 'codex',
+      sitePlatform: 'codex',
+      siteUrl: 'https://chatgpt.com/backend-api/codex',
+      openaiBody: {
+        model: 'gpt-5.2-codex',
+        input: 'hello codex',
+      },
+      downstreamFormat: 'openai',
+      downstreamHeaders: {
+        'user-agent': 'OpenClaw/1.0',
+        version: '0.202.0',
+        session_id: 'session-from-client',
+        'x-responsesapi-include-timing-metrics': '1',
+        origin: 'https://openclaw.example',
+        referer: 'https://openclaw.example/app',
+        'x-forwarded-for': '203.0.113.1',
+        'x-real-ip': '203.0.113.2',
+      },
+      providerHeaders: {
+        Originator: 'codex_cli_rs',
+      },
+    } as any);
+
+    expect(request.headers.Version).toBe('0.202.0');
+    expect(request.headers.Session_id).toBe('session-from-client');
+    expect(request.headers['User-Agent']).toBe('OpenClaw/1.0');
+    expect(request.headers['x-responsesapi-include-timing-metrics']).toBe('1');
+    expect(request.headers.origin).toBeUndefined();
+    expect(request.headers.referer).toBeUndefined();
+    expect(request.headers['x-forwarded-for']).toBeUndefined();
+    expect(request.headers['x-real-ip']).toBeUndefined();
+  });
+
   it('builds codex responses requests against backend-api path and preserves oauth provider headers', () => {
     const request = buildUpstreamEndpointRequest({
       endpoint: 'responses',
@@ -728,7 +815,7 @@ describe('buildUpstreamEndpointRequest', () => {
     expect(request.headers.Session_id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(request.headers.Conversation_id).toBe(request.headers.Session_id);
     expect(request.headers['User-Agent']).toBe('codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464');
-    expect(request.headers.Accept).toBe('text/event-stream');
+    expect(request.headers.Accept).toBe('application/json');
     expect(request.headers.Connection).toBe('Keep-Alive');
     expect(request.body.instructions).toBe('');
     expect(request.body.prompt_cache_key).toBeUndefined();
@@ -1124,11 +1211,18 @@ describe('buildUpstreamEndpointRequest', () => {
       },
     });
 
-    expect(request.path).toBe('/v1internal:generateContent');
+    expect(request.path).toBe('/v1internal:streamGenerateContent?alt=sse');
     expect(request.headers.Authorization).toBe('Bearer oauth-access-token');
+    expect(request.headers.Accept).toBe('text/event-stream');
     expect(request.headers['User-Agent']).toBe('antigravity/1.19.6 darwin/arm64');
     expect(request.headers['X-Goog-Api-Client']).toBeUndefined();
     expect(request.headers['Client-Metadata']).toBeUndefined();
+    expect(request.runtime).toMatchObject({
+      executor: 'antigravity',
+      modelName: 'gemini-3-pro-preview',
+      stream: false,
+      action: 'streamGenerateContent',
+    });
     expect(request.body).toEqual({
       project: 'project-demo',
       model: 'gemini-3-pro-preview',

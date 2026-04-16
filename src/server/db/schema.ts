@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, real, uniqueIndex, index, check } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
 
 export const sites = sqliteTable('sites', {
@@ -167,11 +167,50 @@ export const routeGroupSources = sqliteTable('route_group_sources', {
   sourceRouteIdx: index('route_group_sources_source_route_id_idx').on(table.sourceRouteId),
 }));
 
+export const oauthRouteUnits = sqliteTable('oauth_route_units', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  name: text('name').notNull(),
+  strategy: text('strategy').notNull().default('round_robin'),
+  enabled: integer('enabled', { mode: 'boolean' }).default(true),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  siteProviderIdx: index('oauth_route_units_site_provider_idx').on(table.siteId, table.provider),
+  enabledIdx: index('oauth_route_units_enabled_idx').on(table.enabled),
+}));
+
+export const oauthRouteUnitMembers = sqliteTable('oauth_route_unit_members', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  unitId: integer('unit_id').notNull().references(() => oauthRouteUnits.id, { onDelete: 'cascade' }),
+  accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  sortOrder: integer('sort_order').default(0),
+  successCount: integer('success_count').default(0),
+  failCount: integer('fail_count').default(0),
+  totalLatencyMs: integer('total_latency_ms').default(0),
+  totalCost: real('total_cost').default(0),
+  lastUsedAt: text('last_used_at'),
+  lastSelectedAt: text('last_selected_at'),
+  lastFailAt: text('last_fail_at'),
+  consecutiveFailCount: integer('consecutive_fail_count').notNull().default(0),
+  cooldownLevel: integer('cooldown_level').notNull().default(0),
+  cooldownUntil: text('cooldown_until'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  unitAccountUnique: uniqueIndex('oauth_route_unit_members_unit_account_unique').on(table.unitId, table.accountId),
+  accountUnique: uniqueIndex('oauth_route_unit_members_account_unique').on(table.accountId),
+  unitSortIdx: index('oauth_route_unit_members_unit_sort_idx').on(table.unitId, table.sortOrder),
+  unitCooldownIdx: index('oauth_route_unit_members_unit_cooldown_idx').on(table.unitId, table.cooldownUntil),
+}));
+
 export const routeChannels = sqliteTable('route_channels', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   routeId: integer('route_id').notNull().references(() => tokenRoutes.id, { onDelete: 'cascade' }),
   accountId: integer('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
   tokenId: integer('token_id').references(() => accountTokens.id, { onDelete: 'set null' }),
+  oauthRouteUnitId: integer('oauth_route_unit_id'),
   sourceModel: text('source_model'),
   priority: integer('priority').default(0),
   weight: integer('weight').default(10),
@@ -191,6 +230,7 @@ export const routeChannels = sqliteTable('route_channels', {
   routeIdIdx: index('route_channels_route_id_idx').on(table.routeId),
   accountIdIdx: index('route_channels_account_id_idx').on(table.accountId),
   tokenIdIdx: index('route_channels_token_id_idx').on(table.tokenId),
+  oauthRouteUnitIdx: index('route_channels_oauth_route_unit_id_idx').on(table.oauthRouteUnitId),
   routeEnabledIdx: index('route_channels_route_enabled_idx').on(table.routeId, table.enabled),
   routeTokenIdx: index('route_channels_route_token_idx').on(table.routeId, table.tokenId),
 }));
@@ -334,6 +374,118 @@ export const settings = sqliteTable('settings', {
   value: text('value'), // JSON
 });
 
+export const adminSnapshots = sqliteTable('admin_snapshots', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  namespace: text('namespace').notNull(),
+  snapshotKey: text('snapshot_key').notNull(),
+  payload: text('payload').notNull(),
+  generatedAt: text('generated_at').notNull(),
+  expiresAt: text('expires_at').notNull(),
+  staleUntil: text('stale_until').notNull(),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  namespaceKeyUnique: uniqueIndex('admin_snapshots_namespace_key_unique').on(table.namespace, table.snapshotKey),
+  expiresAtIdx: index('admin_snapshots_expires_at_idx').on(table.expiresAt),
+  staleUntilIdx: index('admin_snapshots_stale_until_idx').on(table.staleUntil),
+}));
+
+export const analyticsProjectionCheckpoints = sqliteTable('analytics_projection_checkpoints', {
+  projectorKey: text('projector_key').primaryKey(),
+  timeZone: text('time_zone').notNull().default('Local'),
+  lastProxyLogId: integer('last_proxy_log_id').notNull().default(0),
+  watermarkCreatedAt: text('watermark_created_at'),
+  leaseOwner: text('lease_owner'),
+  leaseToken: text('lease_token'),
+  leaseExpiresAt: text('lease_expires_at'),
+  recomputeFromId: integer('recompute_from_id'),
+  recomputeRequestedAt: text('recompute_requested_at'),
+  recomputeReason: text('recompute_reason'),
+  recomputeStartedAt: text('recompute_started_at'),
+  recomputeCompletedAt: text('recompute_completed_at'),
+  lastProjectedAt: text('last_projected_at'),
+  lastSuccessfulAt: text('last_successful_at'),
+  lastError: text('last_error'),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  recomputeFromIdIdx: index('analytics_projection_checkpoints_recompute_from_id_idx').on(table.recomputeFromId),
+  leaseExpiresAtIdx: index('analytics_projection_checkpoints_lease_expires_at_idx').on(table.leaseExpiresAt),
+}));
+
+export const siteDayUsage = sqliteTable('site_day_usage', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  localDay: text('local_day').notNull(),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  totalCalls: integer('total_calls').notNull().default(0),
+  successCalls: integer('success_calls').notNull().default(0),
+  failedCalls: integer('failed_calls').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  totalSummarySpend: real('total_summary_spend').notNull().default(0),
+  totalSiteSpend: real('total_site_spend').notNull().default(0),
+  totalLatencyMs: integer('total_latency_ms').notNull().default(0),
+  latencyCount: integer('latency_count').notNull().default(0),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  daySiteUnique: uniqueIndex('site_day_usage_day_site_unique').on(table.localDay, table.siteId),
+  dayIdx: index('site_day_usage_day_idx').on(table.localDay),
+  siteIdx: index('site_day_usage_site_id_idx').on(table.siteId),
+  nonNegative: check(
+    'site_day_usage_non_negative',
+    sql`${table.totalCalls} >= 0 and ${table.successCalls} >= 0 and ${table.failedCalls} >= 0 and ${table.totalTokens} >= 0 and ${table.totalSummarySpend} >= 0 and ${table.totalSiteSpend} >= 0 and ${table.totalLatencyMs} >= 0 and ${table.latencyCount} >= 0`,
+  ),
+}));
+
+export const siteHourUsage = sqliteTable('site_hour_usage', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  bucketStartUtc: text('bucket_start_utc').notNull(),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  totalCalls: integer('total_calls').notNull().default(0),
+  successCalls: integer('success_calls').notNull().default(0),
+  failedCalls: integer('failed_calls').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  totalSummarySpend: real('total_summary_spend').notNull().default(0),
+  totalSiteSpend: real('total_site_spend').notNull().default(0),
+  totalLatencyMs: integer('total_latency_ms').notNull().default(0),
+  latencyCount: integer('latency_count').notNull().default(0),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  hourSiteUnique: uniqueIndex('site_hour_usage_hour_site_unique').on(table.bucketStartUtc, table.siteId),
+  hourIdx: index('site_hour_usage_hour_idx').on(table.bucketStartUtc),
+  siteIdx: index('site_hour_usage_site_id_idx').on(table.siteId),
+  nonNegative: check(
+    'site_hour_usage_non_negative',
+    sql`${table.totalCalls} >= 0 and ${table.successCalls} >= 0 and ${table.failedCalls} >= 0 and ${table.totalTokens} >= 0 and ${table.totalSummarySpend} >= 0 and ${table.totalSiteSpend} >= 0 and ${table.totalLatencyMs} >= 0 and ${table.latencyCount} >= 0`,
+  ),
+}));
+
+export const modelDayUsage = sqliteTable('model_day_usage', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  localDay: text('local_day').notNull(),
+  siteId: integer('site_id').notNull().references(() => sites.id, { onDelete: 'cascade' }),
+  model: text('model').notNull(),
+  totalCalls: integer('total_calls').notNull().default(0),
+  successCalls: integer('success_calls').notNull().default(0),
+  failedCalls: integer('failed_calls').notNull().default(0),
+  totalTokens: integer('total_tokens').notNull().default(0),
+  totalSpend: real('total_spend').notNull().default(0),
+  totalLatencyMs: integer('total_latency_ms').notNull().default(0),
+  latencyCount: integer('latency_count').notNull().default(0),
+  createdAt: text('created_at').default(sql`(datetime('now'))`),
+  updatedAt: text('updated_at').default(sql`(datetime('now'))`),
+}, (table) => ({
+  daySiteModelUnique: uniqueIndex('model_day_usage_day_site_model_unique').on(table.localDay, table.siteId, table.model),
+  dayIdx: index('model_day_usage_day_idx').on(table.localDay),
+  siteIdx: index('model_day_usage_site_id_idx').on(table.siteId),
+  modelIdx: index('model_day_usage_model_idx').on(table.model),
+  nonNegative: check(
+    'model_day_usage_non_negative',
+    sql`${table.totalCalls} >= 0 and ${table.successCalls} >= 0 and ${table.failedCalls} >= 0 and ${table.totalTokens} >= 0 and ${table.totalSpend} >= 0 and ${table.totalLatencyMs} >= 0 and ${table.latencyCount} >= 0`,
+  ),
+}));
+
 export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   name: text('name').notNull(),
@@ -350,6 +502,8 @@ export const downstreamApiKeys = sqliteTable('downstream_api_keys', {
   supportedModels: text('supported_models'), // JSON array<string>
   allowedRouteIds: text('allowed_route_ids'), // JSON array<number>
   siteWeightMultipliers: text('site_weight_multipliers'), // JSON object { [siteId]: multiplier }
+  excludedSiteIds: text('excluded_site_ids'), // JSON array<number>
+  excludedCredentialRefs: text('excluded_credential_refs'), // JSON array<DownstreamExcludedCredentialRef>
   lastUsedAt: text('last_used_at'),
   createdAt: text('created_at').default(sql`(datetime('now'))`),
   updatedAt: text('updated_at').default(sql`(datetime('now'))`),

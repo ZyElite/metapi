@@ -12,8 +12,15 @@ const { apiMock, openMock, focusMock, confirmMock, promptMock } = vi.hoisted(() 
     getOAuthSession: vi.fn(),
     submitOAuthManualCallback: vi.fn(),
     refreshOAuthConnectionQuota: vi.fn(),
+    refreshOAuthConnectionQuotaBatch: vi.fn(),
     rebindOAuthConnection: vi.fn(),
+    updateOAuthConnectionProxy: vi.fn(),
     deleteOAuthConnection: vi.fn(),
+    importOAuthConnections: vi.fn(),
+    createOAuthRouteUnit: vi.fn(),
+    deleteOAuthRouteUnit: vi.fn(),
+    getAccountModels: vi.fn(),
+    checkModels: vi.fn(),
   },
   openMock: vi.fn(),
   focusMock: vi.fn(),
@@ -38,6 +45,48 @@ async function flushMicrotasks() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function findButton(root: WebTestRenderer, label: string) {
+  return root.root.find((node) => (
+    node.type === 'button'
+    && typeof node.props.onClick === 'function'
+    && collectText(node).includes(label)
+  ));
+}
+
+function findOauthSettingInput(root: WebTestRenderer, key: string) {
+  return root.root.find((node) => (
+    node.type === 'input'
+    && node.props['data-oauth-setting'] === key
+  ));
+}
+
+function findOauthImportSettingInput(root: WebTestRenderer, key: string) {
+  return root.root.find((node) => (
+    node.type === 'input'
+    && node.props['data-oauth-import-setting'] === key
+  ));
+}
+
+function findAllByClassName(root: WebTestRenderer, className: string) {
+  return root.root.findAll((node) => (
+    typeof node.props?.className === 'string'
+    && node.props.className.split(' ').includes(className)
+  ));
+}
+
+function findHeaders(root: WebTestRenderer, label: string) {
+  return root.root.findAll((node) => node.type === 'th' && collectText(node) === label);
+}
+
+async function clickButton(root: WebTestRenderer, label: string) {
+  const button = findButton(root, label);
+  await act(async () => {
+    await button.props.onClick();
+  });
+  await flushMicrotasks();
+  return button;
 }
 
 describe('OAuthManagement page', () => {
@@ -135,6 +184,1355 @@ describe('OAuthManagement page', () => {
     }
   });
 
+  it('renders the oauth workbench toolbar and supports batch quota refresh', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 7,
+            siteId: 2,
+            provider: 'codex',
+            email: 'codex-user@example.com',
+            accountKey: 'chatgpt-account-123',
+            planType: 'plus',
+            modelCount: 3,
+            modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
+            status: 'healthy',
+            routeChannelCount: 2,
+            site: {
+              id: 2,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 7,
+            siteId: 2,
+            provider: 'codex',
+            email: 'codex-user@example.com',
+            accountKey: 'chatgpt-account-123',
+            planType: 'plus',
+            modelCount: 3,
+            modelsPreview: ['gpt-5', 'gpt-5-mini', 'gpt-5.2-codex'],
+            status: 'healthy',
+            routeChannelCount: 2,
+            site: {
+              id: 2,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      });
+    apiMock.refreshOAuthConnectionQuotaBatch.mockResolvedValue({
+      success: true,
+      refreshed: 1,
+      failed: 0,
+      items: [
+        {
+          accountId: 7,
+          success: true,
+          quota: {
+            status: 'supported',
+            source: 'reverse_engineered',
+            windows: {
+              fiveHour: { supported: false },
+              sevenDay: { supported: false },
+            },
+          },
+        },
+      ],
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      const text = collectText(root.root);
+      expect(text).toContain('新建 OAuth 连接');
+      expect(text).toContain('导入 JSON');
+      expect(text).toContain('自动刷新');
+      expect(findAllByClassName(root, 'oauth-toolbar-meta')).toHaveLength(0);
+
+      const selectAll = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+        && node.props['data-testid'] === 'oauth-select-all'
+      ));
+
+      await act(async () => {
+        selectAll.props.onChange({ target: { checked: true } });
+      });
+
+      const batchRefreshButton = root.root.find((node) => (
+        node.type === 'button'
+        && typeof node.props.onClick === 'function'
+        && collectText(node).includes('批量刷新额度')
+      ));
+
+      await act(async () => {
+        await batchRefreshButton.props.onClick();
+      });
+      await flushMicrotasks();
+
+      expect(apiMock.refreshOAuthConnectionQuotaBatch).toHaveBeenCalledWith([7]);
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('opens a models modal from the model count trigger and loads the full model list', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 52,
+          siteId: 44,
+          provider: 'codex',
+          username: 'Juricek Team A',
+          email: 'juricek.chen@gmail.com',
+          accountKey: 'chatgpt-account-123',
+          planType: 'team',
+          modelCount: 12,
+          modelsPreview: ['gpt-5.4', 'gpt-5.4-mini', 'gpt-5.3-codex'],
+          status: 'healthy',
+          routeChannelCount: 12,
+          site: {
+            id: 44,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.getAccountModels.mockResolvedValue({
+      siteId: 44,
+      siteName: 'ChatGPT Codex OAuth',
+      totalCount: 4,
+      disabledCount: 1,
+      models: [
+        { name: 'gpt-5.4', latencyMs: 120, disabled: false },
+        { name: 'gpt-5.4-mini', latencyMs: 90, disabled: false },
+        { name: 'gpt-5.3-codex', latencyMs: 110, disabled: false },
+        { name: 'gpt-5.2-codex', latencyMs: null, disabled: true, isManual: true },
+      ],
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root, 'Juricek Team A');
+
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root.root);
+        expect(text).toContain('模型列表 · Juricek Team A');
+        expect(text).toContain('ChatGPT Codex OAuth · 共 4 个模型');
+        expect(text).toContain('gpt-5.2-codex');
+        expect(text).toContain('禁用');
+      });
+
+      expect(apiMock.getAccountModels).toHaveBeenCalledWith(52);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders route participation summaries and can batch merge selected oauth accounts into a route pool', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 21,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'single',
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 22,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'single',
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 21,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 90,
+              name: 'Codex Pool',
+              strategy: 'round_robin',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 22,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 90,
+              name: 'Codex Pool',
+              strategy: 'round_robin',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      });
+    apiMock.createOAuthRouteUnit.mockResolvedValue({
+      success: true,
+      routeUnit: {
+        id: 90,
+        name: 'Codex Pool',
+        strategy: 'round_robin',
+        memberCount: 2,
+      },
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      expect(collectText(root.root)).toContain('单体');
+
+      const selectAll = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+        && node.props['data-testid'] === 'oauth-select-all'
+      ));
+
+      await act(async () => {
+        selectAll.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root, '合并参与路由');
+
+      const nameInput = root.root.find((node) => (
+        node.type === 'input'
+        && node.props['data-testid'] === 'oauth-route-unit-name'
+      ));
+      await act(async () => {
+        nameInput.props.onChange({ target: { value: 'Codex Pool' } });
+      });
+
+      await clickButton(root, '创建路由池');
+
+      expect(apiMock.createOAuthRouteUnit).toHaveBeenCalledWith({
+        accountIds: [21, 22],
+        name: 'Codex Pool',
+        strategy: 'round_robin',
+      });
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+      expect(collectText(root.root)).toContain('已创建路由池');
+      expect(collectText(root.root)).toContain('Codex Pool');
+      expect(collectText(root.root)).toContain('2 个成员');
+      expect(collectText(root.root)).toContain('轮询');
+      expect(collectText(root.root)).toContain('已将选中的 OAuth 账号合并为一个路由池，后续会以单个路由单元参与路由。');
+      expect(collectText(root.root)).toContain('路由池：Codex Pool · 2 个成员 · 轮询');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('can batch split selected oauth accounts out of the same route pool', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 31,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 95,
+              name: 'Split Pool',
+              strategy: 'stick_until_unavailable',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 32,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 95,
+              name: 'Split Pool',
+              strategy: 'stick_until_unavailable',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 31,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'single',
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 32,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'single',
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      });
+    apiMock.deleteOAuthRouteUnit.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      const selectAll = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+        && node.props['data-testid'] === 'oauth-select-all'
+      ));
+
+      await act(async () => {
+        selectAll.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root, '拆回单体');
+
+      expect(apiMock.deleteOAuthRouteUnit).toHaveBeenCalledWith(95);
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+      expect(collectText(root.root)).toContain('单体');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('keeps created route unit feedback when the connection list refresh fails', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 51,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: { kind: 'single' },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 52,
+            siteId: 8,
+            provider: 'codex',
+            email: 'pool-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: { kind: 'single' },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+      .mockRejectedValueOnce(new Error('列表刷新失败'));
+    apiMock.createOAuthRouteUnit.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      const selectAll = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+        && node.props['data-testid'] === 'oauth-select-all'
+      ));
+
+      await act(async () => {
+        selectAll.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root, '合并参与路由');
+
+      const nameInput = root.root.find((node) => (
+        node.type === 'input'
+        && node.props['data-testid'] === 'oauth-route-unit-name'
+      ));
+      await act(async () => {
+        nameInput.props.onChange({ target: { value: 'Fallback Pool' } });
+      });
+
+      await clickButton(root, '创建路由池');
+
+      expect(apiMock.createOAuthRouteUnit).toHaveBeenCalledWith({
+        accountIds: [51, 52],
+        name: 'Fallback Pool',
+        strategy: 'round_robin',
+      });
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+      expect(collectText(root.root)).toContain('已创建路由池，但连接列表刷新失败');
+      expect(collectText(root.root)).toContain('Fallback Pool');
+      expect(collectText(root.root)).toContain('2 个成员');
+      expect(collectText(root.root)).toContain('轮询');
+      expect(collectText(root.root)).not.toContain('已选 2 项');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('keeps split feedback when the connection list refresh fails', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 61,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-a@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 96,
+              name: 'Sticky Pool',
+              strategy: 'stick_until_unavailable',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+          {
+            accountId: 62,
+            siteId: 8,
+            provider: 'codex',
+            email: 'split-b@example.com',
+            planType: 'team',
+            modelCount: 2,
+            modelsPreview: ['gpt-5.4'],
+            status: 'healthy',
+            routeParticipation: {
+              kind: 'route_unit',
+              routeUnitId: 96,
+              name: 'Sticky Pool',
+              strategy: 'stick_until_unavailable',
+              memberCount: 2,
+            },
+            site: {
+              id: 8,
+              name: 'ChatGPT Codex OAuth',
+              url: 'https://chatgpt.com/backend-api/codex',
+              platform: 'codex',
+            },
+          },
+        ],
+        total: 2,
+        limit: 100,
+        offset: 0,
+      })
+      .mockRejectedValueOnce(new Error('列表刷新失败'));
+    apiMock.deleteOAuthRouteUnit.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      const selectAll = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+        && node.props['data-testid'] === 'oauth-select-all'
+      ));
+
+      await act(async () => {
+        selectAll.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root, '拆回单体');
+
+      expect(apiMock.deleteOAuthRouteUnit).toHaveBeenCalledWith(96);
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+      expect(collectText(root.root)).toContain('已拆回单体，但连接列表刷新失败');
+      expect(collectText(root.root)).toContain('Sticky Pool');
+      expect(collectText(root.root)).toContain('2 个成员');
+      expect(collectText(root.root)).toContain('单个用到不可用再切');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('only enables splitting when the full route pool is selected and falls back to routeUnit ids', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 41,
+          siteId: 8,
+          provider: 'codex',
+          email: 'partial-a@example.com',
+          planType: 'team',
+          modelCount: 2,
+          modelsPreview: ['gpt-5.4'],
+          status: 'healthy',
+          routeParticipation: {
+            kind: 'route_unit',
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          routeUnit: {
+            id: 97,
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          site: {
+            id: 8,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+          },
+        },
+        {
+          accountId: 42,
+          siteId: 8,
+          provider: 'codex',
+          email: 'partial-b@example.com',
+          planType: 'team',
+          modelCount: 2,
+          modelsPreview: ['gpt-5.4'],
+          status: 'healthy',
+          routeParticipation: {
+            kind: 'route_unit',
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          routeUnit: {
+            id: 97,
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          site: {
+            id: 8,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+          },
+        },
+        {
+          accountId: 43,
+          siteId: 8,
+          provider: 'codex',
+          email: 'partial-c@example.com',
+          planType: 'team',
+          modelCount: 2,
+          modelsPreview: ['gpt-5.4'],
+          status: 'healthy',
+          routeParticipation: {
+            kind: 'route_unit',
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          routeUnit: {
+            id: 97,
+            name: 'Large Pool',
+            strategy: 'round_robin',
+            memberCount: 3,
+          },
+          site: {
+            id: 8,
+            name: 'ChatGPT Codex OAuth',
+            url: 'https://chatgpt.com/backend-api/codex',
+            platform: 'codex',
+          },
+        },
+      ],
+      total: 3,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.deleteOAuthRouteUnit.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      const checkboxes = root.root.findAll((node) => (
+        node.type === 'input'
+        && node.props.type === 'checkbox'
+      ));
+      expect(checkboxes).toHaveLength(4);
+
+      await act(async () => {
+        checkboxes[1]?.props.onChange({ target: { checked: true } });
+        checkboxes[2]?.props.onChange({ target: { checked: true } });
+      });
+
+      expect(collectText(root.root)).not.toContain('拆回单体');
+
+      await act(async () => {
+        checkboxes[3]?.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root, '拆回单体');
+
+      expect(apiMock.deleteOAuthRouteUnit).toHaveBeenCalledWith(97);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('renders supported quota windows without duplicating raw counters beside the percent', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 91,
+          provider: 'codex',
+          email: 'quota-user@example.com',
+          planType: 'team',
+          modelCount: 12,
+          modelsPreview: ['gpt-5.4'],
+          status: 'healthy',
+          quota: {
+            status: 'supported',
+            source: 'reverse_engineered',
+            lastSyncAt: '2026-03-18T01:00:00.000Z',
+            windows: {
+              fiveHour: {
+                supported: true,
+                used: 100,
+                limit: 100,
+                resetAt: '2999-03-18T01:28:00.000Z',
+              },
+              sevenDay: {
+                supported: true,
+                used: 81,
+                limit: 100,
+                resetAt: '2999-03-22T17:00:00.000Z',
+              },
+            },
+          },
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await vi.waitFor(async () => {
+        await flushMicrotasks();
+        const text = collectText(root.root);
+        expect(text).toContain('100%');
+        expect(text).toContain('81%');
+        expect(text).not.toContain('100 / 100');
+        expect(text).not.toContain('81 / 100');
+        expect(findHeaders(root, '模型 / 路由')).toHaveLength(0);
+        expect(findHeaders(root, '同步')).toHaveLength(0);
+      });
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('previews native oauth json in the workbench modal and closes after adding', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 7,
+            provider: 'codex',
+            email: 'imported@example.com',
+            accountKey: 'chatgpt-account-123',
+            planType: 'plus',
+            modelCount: 0,
+            modelsPreview: [],
+            status: 'healthy',
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+      });
+    apiMock.importOAuthConnections.mockResolvedValue({
+      success: true,
+      imported: 1,
+      skipped: 0,
+      failed: 0,
+      items: [
+        {
+          name: 'Imported Codex OAuth',
+          status: 'imported',
+          accountId: 7,
+          provider: 'codex',
+        },
+      ],
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root, '导入 JSON');
+
+      const textarea = root.root.find((node) => (
+        node.type === 'textarea'
+        && typeof node.props.placeholder === 'string'
+        && node.props.placeholder.includes('"access_token"')
+      ));
+
+      expect(collectText(root.root)).not.toContain('sub2api');
+
+      await act(async () => {
+        textarea.props.onChange({
+          target: {
+            value: JSON.stringify({
+              type: 'codex',
+              access_token: 'oauth-access-token',
+              refresh_token: 'oauth-refresh-token',
+            }),
+          },
+        });
+      });
+
+      expect(collectText(root.root)).toContain('识别结果');
+      expect(collectText(root.root)).toContain('结构有效');
+      expect(collectText(root.root)).toContain('Codex');
+
+      await clickButton(root, '添加');
+
+      expect(apiMock.importOAuthConnections).toHaveBeenCalledWith({
+        type: 'codex',
+        access_token: 'oauth-access-token',
+        refresh_token: 'oauth-refresh-token',
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('已添加 1 个 OAuth 连接');
+      expect(collectText(root.root)).not.toContain('导入 OAuth 连接 JSON');
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('supports selecting multiple json files, defaults import to system proxy, and sends one batch request', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      defaults: {
+        systemProxyConfigured: true,
+      },
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections
+      .mockResolvedValueOnce({ items: [], total: 0, limit: 100, offset: 0 })
+      .mockResolvedValueOnce({
+        items: [
+          {
+            accountId: 9,
+            provider: 'codex',
+            email: 'imported@example.com',
+            accountKey: 'chatgpt-account-456',
+            planType: 'team',
+            modelCount: 0,
+            modelsPreview: [],
+            status: 'healthy',
+          },
+        ],
+        total: 1,
+        limit: 100,
+        offset: 0,
+    });
+    apiMock.importOAuthConnections
+      .mockResolvedValueOnce({
+        success: true,
+        imported: 2,
+        skipped: 1,
+        failed: 0,
+        items: [
+          {
+            name: 'Workspace B',
+            status: 'imported',
+            accountId: 9,
+            provider: 'codex',
+          },
+          {
+            name: 'Workspace A',
+            status: 'imported',
+            accountId: 7,
+            provider: 'codex',
+          },
+          {
+            name: 'Skipped API Key',
+            status: 'skipped',
+            message: 'not oauth',
+          },
+        ],
+      });
+
+    const fileA = {
+      name: 'workspace-a.json',
+      text: vi.fn().mockResolvedValue(JSON.stringify({
+        type: 'codex',
+        access_token: 'oauth-access-token-a',
+        email: 'workspace-a@example.com',
+      })),
+    };
+    const fileB = {
+      name: 'workspace-b.json',
+      text: vi.fn().mockResolvedValue(JSON.stringify({
+        type: 'codex',
+        access_token: 'oauth-access-token-b',
+        email: 'workspace-b@example.com',
+      })),
+    };
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root, '导入 JSON');
+
+      const fileInput = root.root.find((node) => (
+        node.type === 'input'
+        && node.props.type === 'file'
+        && node.props['data-testid'] === 'oauth-import-file-input'
+      ));
+
+      expect(fileInput.props.multiple).toBe(true);
+
+      await act(async () => {
+        await fileInput.props.onChange({
+          target: {
+            files: [fileA, fileB],
+          },
+        });
+      });
+      await flushMicrotasks();
+
+      const importText = collectText(root.root);
+      expect(importText).toContain('workspace-a.json');
+      expect(importText).toContain('workspace-b.json');
+      expect(importText).toContain('已识别 2 份 JSON');
+      expect(importText).toContain('结构有效');
+      expect(findOauthImportSettingInput(root, 'use-system-proxy').props.checked).toBe(true);
+
+      await clickButton(root, '添加');
+
+      expect(apiMock.importOAuthConnections).toHaveBeenCalledTimes(1);
+      expect(apiMock.importOAuthConnections).toHaveBeenCalledWith({
+        items: [
+          {
+            type: 'codex',
+            access_token: 'oauth-access-token-a',
+            email: 'workspace-a@example.com',
+          },
+          {
+            type: 'codex',
+            access_token: 'oauth-access-token-b',
+            email: 'workspace-b@example.com',
+          },
+        ],
+        useSystemProxy: true,
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await flushMicrotasks();
+      expect(collectText(root.root)).toContain('已添加 2 个 OAuth 连接');
+      expect(collectText(root.root)).not.toContain('导入 OAuth 连接 JSON');
+      expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows native oauth guidance when import starts without sources', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root, '导入 JSON');
+      await clickButton(root, '添加');
+
+      expect(collectText(root.root)).toContain('请先选择 JSON 文件或粘贴 OAuth 连接 JSON 内容');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('shows invalid preview feedback before adding oauth json', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root, '导入 JSON');
+
+      const textarea = root.root.find((node) => (
+        node.type === 'textarea'
+        && typeof node.props.placeholder === 'string'
+        && node.props.placeholder.includes('"access_token"')
+      ));
+
+      await act(async () => {
+        textarea.props.onChange({
+          target: {
+            value: '{"type":"codex"}',
+          },
+        });
+      });
+
+      const addButton = findButton(root, '添加');
+      expect(addButton.props.disabled).toBe(true);
+      expect(collectText(root.root)).toContain('结构无效');
+      expect(collectText(root.root)).toContain('缺少 access_token');
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('starts oauth, opens popup, polls status, and refreshes connection list after success', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [
@@ -221,34 +1619,21 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
       });
 
-      const proxyToggle = root!.root.find((node) => (
-        node.type === 'input'
-        && node.props.type === 'checkbox'
-        && node.props['data-oauth-setting'] === 'use-proxy'
-      ));
+      await clickButton(root!, '新建 OAuth 连接');
+
+      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
 
       await act(async () => {
         proxyToggle.props.onChange({ target: { checked: true } });
       });
 
-      const proxyInput = root!.root.find((node) => (
-        node.type === 'input'
-        && node.props['data-oauth-setting'] === 'proxy-url'
-      ));
+      const proxyInput = findOauthSettingInput(root!, 'proxy-url');
 
       await act(async () => {
         proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
       });
 
-      const startButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('连接 Codex')
-      ));
-
-      await act(async () => {
-        await startButton.props.onClick();
-      });
+      await clickButton(root!, '连接 Codex');
       await vi.waitFor(async () => {
         await flushMicrotasks();
       });
@@ -256,6 +1641,7 @@ describe('OAuthManagement page', () => {
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
         projectId: undefined,
         proxyUrl: 'http://127.0.0.1:7890',
+        useSystemProxy: false,
       });
       expect(openMock).toHaveBeenCalledWith(
         'https://auth.openai.com/oauth/authorize?state=oauth-state-123',
@@ -341,15 +1727,8 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
       });
 
-      const startButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('连接 Claude')
-      ));
-
-      await act(async () => {
-        await startButton.props.onClick();
-      });
+      await clickButton(root!, '新建 OAuth 连接');
+      await clickButton(root!, '连接 Claude');
       await vi.waitFor(async () => {
         await flushMicrotasks();
       });
@@ -436,13 +1815,11 @@ describe('OAuthManagement page', () => {
         const text = collectText(root!.root);
         expect(text).toContain('官方上游连接');
         expect(text).toContain('CLI');
-        expect(text).toContain('下游密钥');
+        expect(text).toContain('API Key');
       });
 
-      const startButton = root!.root.find((node) => (
-        node.type === 'button'
-        && collectText(node).includes('当前不可用')
-      ));
+      await clickButton(root!, '新建 OAuth 连接');
+      const startButton = findButton(root!, '连接 Codex');
       expect(startButton.props.disabled).toBe(true);
       expect(collectText(root!.root)).toContain('当前环境未启用');
     } finally {
@@ -563,20 +1940,12 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
       });
 
-      const startButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('连接 Gemini CLI')
-      ));
-
-      await act(async () => {
-        await startButton.props.onClick();
-      });
+      await clickButton(root!, '新建 OAuth 连接');
+      await clickButton(root!, '连接 Gemini CLI');
       await vi.waitFor(async () => {
         await flushMicrotasks();
       });
 
-      expect(promptMock).toHaveBeenCalled();
       expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('gemini-cli', { projectId: undefined });
       expect(openMock).toHaveBeenCalledWith(
         'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-state-123',
@@ -655,15 +2024,8 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
       });
 
-      const rebindButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('重新授权')
-      ));
-
-      await act(async () => {
-        await rebindButton.props.onClick();
-      });
+      await clickButton(root!, '重新授权');
+      await clickButton(root!, '重新授权 Gemini CLI');
       await vi.waitFor(async () => {
         await flushMicrotasks();
       });
@@ -743,26 +2105,156 @@ describe('OAuthManagement page', () => {
       });
       await flushMicrotasks();
 
-      const rebindButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('重新授权')
-      ));
-
-      await act(async () => {
-        await rebindButton.props.onClick();
-      });
+      await clickButton(root!, '重新授权');
+      await clickButton(root!, '重新授权 Gemini CLI');
       await flushMicrotasks();
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
         proxyUrl: 'http://127.0.0.1:7890',
+        useSystemProxy: false,
       });
     } finally {
       root?.unmount();
     }
   });
 
-  it('can clear the stored account proxy during rebind', async () => {
+  it('opens oauth proxy settings from the dedicated proxy action', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'gemini-cli',
+          label: 'Gemini CLI',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 11,
+          provider: 'gemini-cli',
+          email: 'gemini@example.com',
+          projectId: 'project-demo',
+          modelCount: 5,
+          modelsPreview: ['gemini-2.5-pro'],
+          status: 'healthy',
+          proxyUrl: 'http://127.0.0.1:7890',
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root!, '代理设置');
+
+      expect(collectText(root!.root)).toContain('已打开 OAuth 代理设置');
+      expect(collectText(root!.root)).toContain('代理设置 · gemini@example.com');
+
+      const proxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
+      const proxyInput = findOauthSettingInput(root!, 'proxy-url');
+
+      expect(findOauthSettingInput(root!, 'use-system-proxy').props.checked).toBe(false);
+
+      expect(proxyToggle).toBeTruthy();
+      expect(proxyToggle.props.checked).toBe(true);
+      expect(proxyInput).toBeTruthy();
+      expect(proxyInput.props.disabled).toBe(false);
+      expect(proxyInput.props.value).toBe('http://127.0.0.1:7890');
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('can clear the stored account proxy without forcing reauthorization', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'gemini-cli',
+          label: 'Gemini CLI',
+          platform: 'gemini-cli',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: true,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({
+      items: [
+        {
+          accountId: 11,
+          provider: 'gemini-cli',
+          email: 'gemini@example.com',
+          projectId: 'project-demo',
+          modelCount: 5,
+          modelsPreview: ['gemini-2.5-pro'],
+          status: 'healthy',
+          proxyUrl: 'http://127.0.0.1:7890',
+        },
+      ],
+      total: 1,
+      limit: 100,
+      offset: 0,
+    });
+    apiMock.updateOAuthConnectionProxy.mockResolvedValue({ success: true });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root!, '代理设置');
+      const customProxyToggle = findOauthSettingInput(root!, 'use-custom-proxy');
+
+      await act(async () => {
+        customProxyToggle.props.onChange({ target: { checked: false } });
+      });
+
+      await clickButton(root!, '保存代理');
+      await flushMicrotasks();
+
+      expect(apiMock.updateOAuthConnectionProxy).toHaveBeenCalledWith(11, {
+        proxyUrl: null,
+        useSystemProxy: false,
+      });
+      expect(apiMock.rebindOAuthConnection).not.toHaveBeenCalled();
+      expect(openMock).not.toHaveBeenCalled();
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('keeps a secondary save-and-reauthorize action in the proxy drawer', async () => {
     apiMock.getOAuthProviders.mockResolvedValue({
       providers: [
         {
@@ -797,8 +2289,8 @@ describe('OAuthManagement page', () => {
     });
     apiMock.rebindOAuthConnection.mockResolvedValue({
       provider: 'gemini-cli',
-      state: 'gemini-rebind-clear',
-      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-rebind-clear',
+      state: 'gemini-rebind-save-and-reauthorize',
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-rebind-save-and-reauthorize',
       instructions: {
         redirectUri: 'http://localhost:8085/oauth2callback',
         callbackPort: 8085,
@@ -808,7 +2300,7 @@ describe('OAuthManagement page', () => {
     });
     apiMock.getOAuthSession.mockResolvedValue({
       provider: 'gemini-cli',
-      state: 'gemini-rebind-clear',
+      state: 'gemini-rebind-save-and-reauthorize',
       status: 'pending',
     });
 
@@ -825,29 +2317,88 @@ describe('OAuthManagement page', () => {
       });
       await flushMicrotasks();
 
-      const clearProxyToggle = root!.root.find((node) => (
-        node.type === 'input'
-        && node.props.type === 'checkbox'
-        && node.props['data-oauth-setting'] === 'clear-proxy'
-      ));
+      await clickButton(root!, '代理设置');
+      expect(collectText(root!.root)).toContain('保存代理');
+      expect(collectText(root!.root)).toContain('保存并重新授权');
 
-      await act(async () => {
-        clearProxyToggle.props.onChange({ target: { checked: true } });
-      });
-
-      const rebindButton = root!.root.find((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && collectText(node).includes('重新授权')
-      ));
-
-      await act(async () => {
-        await rebindButton.props.onClick();
-      });
+      await clickButton(root!, '保存并重新授权');
       await flushMicrotasks();
 
       expect(apiMock.rebindOAuthConnection).toHaveBeenCalledWith(11, {
+        proxyUrl: 'http://127.0.0.1:7890',
+        useSystemProxy: false,
+      });
+      expect(openMock).toHaveBeenCalledWith(
+        'https://accounts.google.com/o/oauth2/v2/auth?state=gemini-rebind-save-and-reauthorize',
+        'oauth-gemini-cli',
+        expect.stringContaining('width=540'),
+      );
+    } finally {
+      root?.unmount();
+    }
+  });
+
+  it('starts oauth with the configured system proxy when selected', async () => {
+    apiMock.getOAuthProviders.mockResolvedValue({
+      providers: [
+        {
+          provider: 'codex',
+          label: 'ChatGPT Codex',
+          platform: 'codex',
+          enabled: true,
+          loginType: 'oauth',
+          requiresProjectId: false,
+          supportsDirectAccountRouting: true,
+          supportsCloudValidation: true,
+          supportsNativeProxy: true,
+        },
+      ],
+    });
+    apiMock.getOAuthConnections.mockResolvedValue({ items: [], total: 0, limit: 100, offset: 0 });
+    apiMock.startOAuthProvider.mockResolvedValue({
+      provider: 'codex',
+      state: 'oauth-state-system-proxy',
+      authorizationUrl: 'https://auth.openai.com/oauth/authorize?state=oauth-state-system-proxy',
+      instructions: {
+        redirectUri: 'http://localhost:1455/auth/callback',
+        callbackPort: 1455,
+        callbackPath: '/auth/callback',
+        manualCallbackDelayMs: 15000,
+      },
+    });
+    apiMock.getOAuthSession.mockResolvedValue({
+      provider: 'codex',
+      state: 'oauth-state-system-proxy',
+      status: 'pending',
+    });
+
+    let root!: WebTestRenderer;
+    try {
+      await act(async () => {
+        root = create(
+          <ToastProvider>
+            <MemoryRouter>
+              <OAuthManagement />
+            </MemoryRouter>
+          </ToastProvider>,
+        );
+      });
+      await flushMicrotasks();
+
+      await clickButton(root!, '新建 OAuth 连接');
+      const systemProxyToggle = findOauthSettingInput(root!, 'use-system-proxy');
+
+      await act(async () => {
+        systemProxyToggle.props.onChange({ target: { checked: true } });
+      });
+
+      await clickButton(root!, '连接 ChatGPT Codex');
+      await flushMicrotasks();
+
+      expect(apiMock.startOAuthProvider).toHaveBeenCalledWith('codex', {
+        projectId: undefined,
         proxyUrl: null,
+        useSystemProxy: true,
       });
     } finally {
       root?.unmount();
@@ -929,20 +2480,10 @@ describe('OAuthManagement page', () => {
       });
       await flushMicrotasks();
 
-      const proxyToggle = root.root.find((node) => (
-        node.type === 'input'
-        && node.props.type === 'checkbox'
-        && node.props['data-oauth-setting'] === 'use-proxy'
-      ));
-      const proxyInput = root.root.find((node) => (
-        node.type === 'input'
-        && node.props['data-oauth-setting'] === 'proxy-url'
-      ));
-      const startButtons = root.root.findAll((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && String(node.props.children).startsWith('连接 ')
-      ));
+      await clickButton(root, '新建 OAuth 连接');
+
+      const proxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
+      const proxyInput = findOauthSettingInput(root, 'proxy-url');
 
       await act(async () => {
         proxyToggle.props.onChange({ target: { checked: true } });
@@ -950,43 +2491,22 @@ describe('OAuthManagement page', () => {
       await act(async () => {
         proxyInput.props.onChange({ target: { value: 'http://127.0.0.1:7890' } });
       });
-      await act(async () => {
-        await startButtons[0].props.onClick();
-      });
+      await clickButton(root, '连接 ChatGPT Codex');
       await flushMicrotasks();
 
       expect(apiMock.startOAuthProvider).toHaveBeenNthCalledWith(1, 'codex', {
         projectId: undefined,
         proxyUrl: 'http://127.0.0.1:7890',
+        useSystemProxy: false,
       });
 
-      const resetProxyToggle = root.root.find((node) => (
-        node.type === 'input'
-        && node.props.type === 'checkbox'
-        && node.props['data-oauth-setting'] === 'use-proxy'
-      ));
-      const resetProxyInput = root.root.find((node) => (
-        node.type === 'input'
-        && node.props['data-oauth-setting'] === 'proxy-url'
-      ));
+      const resetProxyToggle = findOauthSettingInput(root, 'use-custom-proxy');
+      const resetProxyInput = findOauthSettingInput(root, 'proxy-url');
+      const resetSystemProxyToggle = findOauthSettingInput(root, 'use-system-proxy');
 
       expect(resetProxyToggle.props.checked).toBe(false);
       expect(resetProxyInput.props.value).toBe('');
-
-      const refreshedStartButtons = root.root.findAll((node) => (
-        node.type === 'button'
-        && typeof node.props.onClick === 'function'
-        && String(node.props.children).startsWith('连接 ')
-      ));
-
-      await act(async () => {
-        await refreshedStartButtons[1].props.onClick();
-      });
-      await flushMicrotasks();
-
-      expect(apiMock.startOAuthProvider).toHaveBeenNthCalledWith(2, 'claude', {
-        projectId: undefined,
-      });
+      expect(resetSystemProxyToggle.props.checked).toBe(false);
     } finally {
       root?.unmount();
     }
@@ -1020,8 +2540,9 @@ describe('OAuthManagement page', () => {
             modelsPreview: ['gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex'],
             status: 'abnormal',
             quota: {
-              status: 'supported',
+              status: 'error',
               source: 'reverse_engineered',
+              lastError: '{"detail":{"code":"deactivated_workspace"}}',
               subscription: {
                 planType: 'team',
                 activeStart: '2026-03-01T00:00:00.000Z',
@@ -1067,14 +2588,13 @@ describe('OAuthManagement page', () => {
         await flushMicrotasks();
         const text = collectText(root!.root);
         expect(text).toContain('异常');
-        expect(text).toContain('1 条路由');
         expect(text).toContain('Codex 模型获取失败');
-        expect(text).toContain('额度状态');
+        expect(text).toContain('HTTP 403: forbidden');
         expect(text).toContain('team');
-        expect(text).toContain('2026-03-01T00:00:00.000Z');
-        expect(text).toContain('2026-04-01T00:00:00.000Z');
-        expect(text).toContain('2026-03-17T13:00:00.000Z');
-        expect(text).toContain('官方未提供');
+        expect(text).toContain('11 个模型');
+        expect(text).toContain('deactivated_workspace');
+        expect(text).not.toContain('当前 Codex OAuth 未暴露官方 5h 窗口');
+        expect(text).not.toContain('当前 Codex OAuth 未暴露官方 7d 窗口');
         expect(text).toContain('http://***@127.0.0.1:7890');
         expect(text).not.toContain('oauth-user:secret');
       });
@@ -1229,7 +2749,8 @@ describe('OAuthManagement page', () => {
       expect(apiMock.refreshOAuthConnectionQuota).toHaveBeenCalledWith(7);
       expect(apiMock.getOAuthConnections).toHaveBeenCalledTimes(2);
       expect(collectText(root!.root)).toContain('额度信息已刷新');
-      expect(collectText(root!.root)).toContain('2026-03-18T01:00:00.000Z');
+      expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 5h 窗口');
+      expect(collectText(root!.root)).not.toContain('当前 Codex OAuth 未暴露官方 7d 窗口');
     } finally {
       root?.unmount();
     }

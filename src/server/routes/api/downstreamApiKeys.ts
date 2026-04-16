@@ -1,5 +1,5 @@
 import { FastifyInstance } from 'fastify';
-import { and, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import { db, hasProxyLogDownstreamApiKeyIdColumn, runtimeDbDialect, schema } from '../../db/index.js';
 import { insertAndGetById } from '../../db/insertHelpers.js';
 import {
@@ -10,6 +10,14 @@ import {
   toPersistenceJson,
 } from '../../services/downstreamApiKeyService.js';
 import { formatUtcSqlDateTime } from '../../services/localTimeService.js';
+import type { DownstreamExcludedCredentialRef } from '../../services/downstreamPolicyTypes.js';
+import {
+  readDownstreamApiKeyTrendBuckets,
+  resolveDownstreamTrendBucketSeconds,
+  resolveDownstreamTrendRangeSinceUtc,
+  resolveDownstreamTrendTimeZone,
+  type DownstreamKeyTrendRange,
+} from '../../services/downstreamApiKeyTrendService.js';
 import {
   parseDownstreamApiKeyBatchPayload,
   parseDownstreamApiKeyPayload,
@@ -77,7 +85,7 @@ function normalizeBatchIds(raw: unknown): number[] {
   return ids;
 }
 
-type DownstreamKeyRange = '24h' | '7d' | 'all';
+type DownstreamKeyRange = DownstreamKeyTrendRange;
 type DownstreamKeyStatus = 'all' | 'enabled' | 'disabled';
 
 function normalizeDownstreamKeyRange(raw: unknown): DownstreamKeyRange {
@@ -123,42 +131,14 @@ function normalizeTagMatchMode(raw: unknown): 'any' | 'all' {
 }
 
 function resolveRangeSinceUtc(range: DownstreamKeyRange): string | null {
-  const nowTs = Date.now();
-  if (range === '24h') return formatUtcSqlDateTime(new Date(nowTs - 24 * 60 * 60 * 1000));
-  if (range === '7d') return formatUtcSqlDateTime(new Date(nowTs - 7 * 24 * 60 * 60 * 1000));
-  return null;
-}
-
-function resolveBucketSeconds(range: DownstreamKeyRange): number {
-  return range === 'all' ? 86400 : 3600;
-}
-
-export function buildBucketTsExpressionForDialect(
-  dialect: 'sqlite' | 'mysql' | 'postgres',
-  createdAtColumn: SQLWrapper,
-  bucketSeconds: number,
-) {
-  if (dialect === 'mysql') {
-    return sql<number>`floor(unix_timestamp(${createdAtColumn}) / ${bucketSeconds}) * ${bucketSeconds}`;
-  }
-  if (dialect === 'postgres') {
-    const createdAtTimestamp = sql`cast(${createdAtColumn} as timestamp)`;
-    if (bucketSeconds === 86400) {
-      return sql<number>`extract(epoch from date_trunc('day', ${createdAtTimestamp}))::bigint`;
-    }
-    return sql<number>`extract(epoch from date_trunc('hour', ${createdAtTimestamp}))::bigint`;
-  }
-  // sqlite
-  return sql<number>`cast(cast(strftime('%s', ${createdAtColumn}) as integer) / ${bucketSeconds} as integer) * ${bucketSeconds}`;
-}
-
-function resolveBucketTsExpression(bucketSeconds: number) {
-  return buildBucketTsExpressionForDialect(runtimeDbDialect, schema.proxyLogs.createdAt, bucketSeconds);
+  return resolveDownstreamTrendRangeSinceUtc(range);
 }
 
 async function validatePolicyReferences(input: {
   allowedRouteIds: number[];
   siteWeightMultipliers: Record<number, number>;
+  excludedSiteIds: number[];
+  excludedCredentialRefs: DownstreamExcludedCredentialRef[];
 }): Promise<string | null> {
   const routeIds = input.allowedRouteIds || [];
   if (routeIds.length > 0) {
@@ -173,10 +153,14 @@ async function validatePolicyReferences(input: {
     }
   }
 
-  const siteIds = Object.keys(input.siteWeightMultipliers || {})
+  const weightedSiteIds = Object.keys(input.siteWeightMultipliers || {})
     .map((key) => Number(key))
     .filter((value) => Number.isFinite(value) && value > 0)
     .map((value) => Math.trunc(value));
+  const excludedSiteIds = (input.excludedSiteIds || [])
+    .filter((value) => Number.isFinite(value) && value > 0)
+    .map((value) => Math.trunc(value));
+  const siteIds = Array.from(new Set([...weightedSiteIds, ...excludedSiteIds]));
   if (siteIds.length > 0) {
     const rows = await db.select({ id: schema.sites.id })
       .from(schema.sites)
@@ -185,7 +169,70 @@ async function validatePolicyReferences(input: {
     const existingIds = new Set(rows.map((row) => Number(row.id)));
     const missingIds = siteIds.filter((id) => !existingIds.has(id));
     if (missingIds.length > 0) {
-      return `siteWeightMultipliers 包含不存在的站点: ${missingIds.join(', ')}`;
+      return `策略中包含不存在的站点: ${missingIds.join(', ')}`;
+    }
+  }
+
+  const credentialRefs = input.excludedCredentialRefs || [];
+  const accountTokenRefs = credentialRefs.filter((ref): ref is Extract<DownstreamExcludedCredentialRef, { kind: 'account_token' }> => ref.kind === 'account_token');
+  if (accountTokenRefs.length > 0) {
+    const tokenIds = Array.from(new Set(accountTokenRefs.map((ref) => ref.tokenId)));
+    const rows = await db.select({
+      tokenId: schema.accountTokens.id,
+      accountId: schema.accounts.id,
+      siteId: schema.accounts.siteId,
+    })
+      .from(schema.accountTokens)
+      .innerJoin(schema.accounts, eq(schema.accountTokens.accountId, schema.accounts.id))
+      .where(inArray(schema.accountTokens.id, tokenIds))
+      .all();
+    const tokenById = new Map<number, { tokenId: number; accountId: number; siteId: number }>(
+      rows.map((row) => [Number(row.tokenId), {
+        tokenId: Number(row.tokenId),
+        accountId: Number(row.accountId),
+        siteId: Number(row.siteId),
+      }]),
+    );
+    for (const ref of accountTokenRefs) {
+      const matched = tokenById.get(ref.tokenId);
+      if (!matched) {
+        return `excludedCredentialRefs 包含不存在的令牌: ${ref.tokenId}`;
+      }
+      if (Number(matched.accountId) !== ref.accountId || Number(matched.siteId) !== ref.siteId) {
+        return `excludedCredentialRefs 中的 account_token 引用与账号/站点不匹配: ${ref.tokenId}`;
+      }
+    }
+  }
+
+  const defaultApiKeyRefs = credentialRefs.filter((ref): ref is Extract<DownstreamExcludedCredentialRef, { kind: 'default_api_key' }> => ref.kind === 'default_api_key');
+  if (defaultApiKeyRefs.length > 0) {
+    const accountIds = Array.from(new Set(defaultApiKeyRefs.map((ref) => ref.accountId)));
+    const rows = await db.select({
+      accountId: schema.accounts.id,
+      siteId: schema.accounts.siteId,
+      apiToken: schema.accounts.apiToken,
+    })
+      .from(schema.accounts)
+      .where(inArray(schema.accounts.id, accountIds))
+      .all();
+    const accountById = new Map<number, { accountId: number; siteId: number; apiToken: string | null }>(
+      rows.map((row) => [Number(row.accountId), {
+        accountId: Number(row.accountId),
+        siteId: Number(row.siteId),
+        apiToken: row.apiToken,
+      }]),
+    );
+    for (const ref of defaultApiKeyRefs) {
+      const matched = accountById.get(ref.accountId);
+      if (!matched) {
+        return `excludedCredentialRefs 包含不存在的账号: ${ref.accountId}`;
+      }
+      if (Number(matched.siteId) !== ref.siteId) {
+        return `excludedCredentialRefs 中的 default_api_key 引用与站点不匹配: ${ref.accountId}`;
+      }
+      if (!(matched.apiToken || '').trim()) {
+        return `excludedCredentialRefs 中的 default_api_key 账号缺少默认 API Key: ${ref.accountId}`;
+      }
     }
   }
 
@@ -377,7 +424,7 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     return { success: true, item, usage: { last24h, last7d, all } };
   });
 
-  app.get<{ Params: { id: string }; Querystring: { range?: string } }>('/api/downstream-keys/:id/trend', async (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { range?: string; timeZone?: string } }>('/api/downstream-keys/:id/trend', async (request, reply) => {
     const id = parseRouteId(request.params.id);
     if (!id) {
       return reply.code(400).send({ success: false, message: 'id 无效' });
@@ -391,49 +438,29 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
 
     const columnReady = await hasProxyLogDownstreamApiKeyIdColumn();
     if (!columnReady) {
-      return { success: true, range, item: { id: item.id, name: item.name }, buckets: [] };
+      return {
+        success: true,
+        range,
+        item: { id: item.id, name: item.name },
+        bucketSeconds: resolveDownstreamTrendBucketSeconds(range),
+        timeZone: resolveDownstreamTrendTimeZone(request.query?.timeZone),
+        buckets: [],
+      };
     }
 
-    const bucketSeconds = resolveBucketSeconds(range);
-    const bucketTs = resolveBucketTsExpression(bucketSeconds);
-    const sinceUtc = resolveRangeSinceUtc(range);
-
-    const rows = await db.select({
-      bucketTs,
-      totalRequests: sql<number>`count(*)`,
-      successRequests: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 1 else 0 end), 0)`,
-      failedRequests: sql<number>`coalesce(sum(case when ${schema.proxyLogs.status} = 'success' then 0 else 1 end), 0)`,
-      totalTokens: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.totalTokens}, 0)), 0)`,
-      totalCost: sql<number>`coalesce(sum(coalesce(${schema.proxyLogs.estimatedCost}, 0)), 0)`,
-    })
-      .from(schema.proxyLogs)
-      .where(and(
-        eq(schema.proxyLogs.downstreamApiKeyId, id),
-        ...(sinceUtc ? [sql`${schema.proxyLogs.createdAt} >= ${sinceUtc}`] : []),
-      ))
-      .groupBy(bucketTs)
-      .orderBy(bucketTs)
-      .all();
+    const trend = await readDownstreamApiKeyTrendBuckets({
+      downstreamApiKeyId: id,
+      range,
+      timeZone: request.query?.timeZone,
+    });
 
     return {
       success: true,
       range,
       item: { id: item.id, name: item.name },
-      bucketSeconds,
-      buckets: rows.map((row: any) => {
-        const tsSeconds = Number(row.bucketTs || 0);
-        const totalRequests = Number(row.totalRequests || 0);
-        const successRequests = Number(row.successRequests || 0);
-        return {
-          startUtc: tsSeconds > 0 ? new Date(tsSeconds * 1000).toISOString() : null,
-          totalRequests,
-          successRequests,
-          failedRequests: Number(row.failedRequests || 0),
-          successRate: totalRequests > 0 ? Math.round((successRequests / totalRequests) * 1000) / 10 : null,
-          totalTokens: Number(row.totalTokens || 0),
-          totalCost: Math.round(Number(row.totalCost || 0) * 1_000_000) / 1_000_000,
-        };
-      }),
+      bucketSeconds: trend.bucketSeconds,
+      timeZone: trend.timeZone,
+      buckets: trend.buckets,
     };
   });
 
@@ -470,6 +497,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
       siteWeightMultipliers: normalized.siteWeightMultipliers,
+      excludedSiteIds: normalized.excludedSiteIds,
+      excludedCredentialRefs: normalized.excludedCredentialRefs,
     });
     if (policyRefError) {
       return reply.code(400).send({ success: false, message: policyRefError });
@@ -496,6 +525,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
           supportedModels: toPersistenceJson(normalized.supportedModels),
           allowedRouteIds: toPersistenceJson(normalized.allowedRouteIds),
           siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
+          excludedSiteIds: toPersistenceJson(normalized.excludedSiteIds),
+          excludedCredentialRefs: toPersistenceJson(normalized.excludedCredentialRefs),
           createdAt: nowIso,
           updatedAt: nowIso,
         },
@@ -552,6 +583,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         supportedModels: hasOwn('supportedModels') ? body.supportedModels : existingView.supportedModels,
         allowedRouteIds: hasOwn('allowedRouteIds') ? body.allowedRouteIds : existingView.allowedRouteIds,
         siteWeightMultipliers: hasOwn('siteWeightMultipliers') ? body.siteWeightMultipliers : existingView.siteWeightMultipliers,
+        excludedSiteIds: hasOwn('excludedSiteIds') ? body.excludedSiteIds : existingView.excludedSiteIds,
+        excludedCredentialRefs: hasOwn('excludedCredentialRefs') ? body.excludedCredentialRefs : existingView.excludedCredentialRefs,
       });
     } catch (error: unknown) {
       return reply.code(400).send({ success: false, message: (error as Error)?.message || '参数无效' });
@@ -569,6 +602,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
     const policyRefError = await validatePolicyReferences({
       allowedRouteIds: normalized.allowedRouteIds,
       siteWeightMultipliers: normalized.siteWeightMultipliers,
+      excludedSiteIds: normalized.excludedSiteIds,
+      excludedCredentialRefs: normalized.excludedCredentialRefs,
     });
     if (policyRefError) {
       return reply.code(400).send({ success: false, message: policyRefError });
@@ -589,6 +624,8 @@ export async function downstreamApiKeysRoutes(app: FastifyInstance) {
         supportedModels: toPersistenceJson(normalized.supportedModels),
         allowedRouteIds: toPersistenceJson(normalized.allowedRouteIds),
         siteWeightMultipliers: toPersistenceJson(normalized.siteWeightMultipliers),
+        excludedSiteIds: toPersistenceJson(normalized.excludedSiteIds),
+        excludedCredentialRefs: toPersistenceJson(normalized.excludedCredentialRefs),
         updatedAt: nowIso,
       }).where(eq(schema.downstreamApiKeys.id, id)).run();
 

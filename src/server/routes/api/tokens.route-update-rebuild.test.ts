@@ -11,6 +11,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
   let app: FastifyInstance;
   let db: DbModule['db'];
   let schema: DbModule['schema'];
+  let resetTokenRouteReadLimitersForTests: (options?: { summaryPoints?: number; listPoints?: number }) => void;
   let dataDir = '';
   let seedId = 0;
 
@@ -61,12 +62,14 @@ describe('PUT /api/routes/:id route rebuild', () => {
     const routesModule = await import('./tokens.js');
     db = dbModule.db;
     schema = dbModule.schema;
+    resetTokenRouteReadLimitersForTests = routesModule.resetTokenRouteReadLimitersForTests;
 
     app = Fastify();
     await app.register(routesModule.tokensRoutes);
   });
 
   beforeEach(async () => {
+    resetTokenRouteReadLimitersForTests();
     await db.delete(schema.routeChannels).run();
     await db.delete(schema.tokenRoutes).run();
     await db.delete(schema.tokenModelAvailability).run();
@@ -148,6 +151,35 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(rebuiltAuto?.manualOverride).toBe(false);
     expect(rebuiltAuto?.priority).toBe(0);
     expect(rebuiltAuto?.weight).toBe(10);
+  });
+
+  it('rate limits repeated route overview reads', async () => {
+    resetTokenRouteReadLimitersForTests({
+      summaryPoints: 1,
+      listPoints: 1,
+    });
+
+    const firstSummary = await app.inject({
+      method: 'GET',
+      url: '/api/routes/summary',
+    });
+    const secondSummary = await app.inject({
+      method: 'GET',
+      url: '/api/routes/summary',
+    });
+    const firstRoutes = await app.inject({
+      method: 'GET',
+      url: '/api/routes',
+    });
+    const secondRoutes = await app.inject({
+      method: 'GET',
+      url: '/api/routes',
+    });
+
+    expect(firstSummary.statusCode).toBe(200);
+    expect(secondSummary.statusCode).toBe(429);
+    expect(firstRoutes.statusCode).toBe(200);
+    expect(secondRoutes.statusCode).toBe(429);
   });
 
   it('creates explicit-group routes with sourceRouteIds and aggregates source channels', async () => {
@@ -626,7 +658,7 @@ describe('PUT /api/routes/:id route rebuild', () => {
     expect(updated?.tokenId).toBe(seeded.token.id);
   });
 
-  it('prefers an exact route over a colliding explicit-group display name', async () => {
+  it('prefers an explicit-group display name over a colliding exact route', async () => {
     const exactCandidate = await seedAccountWithToken('claude-opus-4-6');
     const groupedCandidate = await seedAccountWithToken('claude-opus-4-5');
 
@@ -684,9 +716,8 @@ describe('PUT /api/routes/:id route rebuild', () => {
       success: true,
       decision: {
         matched: true,
-        routeId: exactRoute.id,
-        modelPattern: 'claude-opus-4-6',
-        actualModel: 'claude-opus-4-6',
+        routeId: groupResponse.json().id,
+        actualModel: 'claude-opus-4-5',
       },
     });
   });

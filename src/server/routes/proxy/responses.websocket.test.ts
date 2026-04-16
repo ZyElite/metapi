@@ -96,6 +96,7 @@ vi.mock('../../services/proxyUsageFallbackService.js', () => ({
 }));
 
 vi.mock('../../services/oauth/quota.js', () => ({
+  recordOauthQuotaHeadersSnapshot: async () => undefined,
   recordOauthQuotaResetHint: async () => undefined,
 }));
 
@@ -617,7 +618,7 @@ describe('responses websocket transport', () => {
       type: 'error',
       status: 408,
       error: {
-        message: '当前站点的 AI 请求地址均不可用',
+        message: '当前站点的 API 请求地址均不可用',
       },
     });
     expect(fetchMock).toHaveBeenCalledTimes(0);

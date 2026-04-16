@@ -16,7 +16,7 @@ import { detectProxyFailure } from './proxyFailureJudge.js';
 import { resolveProxyLogBilling } from './proxyBilling.js';
 import { getProxyAuthContext } from '../../middleware/auth.js';
 import { buildUpstreamUrl } from './upstreamUrl.js';
-import { detectDownstreamClientContext, type DownstreamClientContext } from './downstreamClientContext.js';
+import { detectDownstreamClientContext, type DownstreamClientContext } from '../../proxy-core/downstreamClientContext.js';
 import { insertProxyLog } from '../../services/proxyLogStore.js';
 import { fetchWithObservedFirstByte, getObservedResponseMeta } from '../../proxy-core/firstByteTimeout.js';
 import { getProxyMaxChannelRetries } from '../../services/proxyChannelRetry.js';
@@ -208,6 +208,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             billingDetails,
             clientContext,
             downstreamPath,
+            resolvedUsage.usageSource,
             isStream,
             firstByteLatencyMs,
           );
@@ -247,6 +248,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
             null,
             clientContext,
             downstreamPath,
+            null,
             isStream,
             firstByteLatencyMs,
           );
@@ -309,6 +311,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           billingDetails,
           clientContext,
           downstreamPath,
+          resolvedUsage.usageSource,
           isStream,
           firstByteLatencyMs,
         );
@@ -338,6 +341,7 @@ export async function completionsProxyRoute(app: FastifyInstance) {
           null,
           clientContext,
           downstreamPath,
+          null,
           isStream,
           firstByteLatencyMs,
         );
@@ -381,6 +385,7 @@ async function logProxy(
   billingDetails: unknown = null,
   clientContext: DownstreamClientContext | null = null,
   downstreamPath = '/v1/completions',
+  usageSource: 'upstream' | 'self-log' | 'unknown' | null = null,
   isStream: boolean,
   firstByteLatencyMs: number | null,
 ) {
@@ -393,6 +398,7 @@ async function logProxy(
       sessionId: clientContext?.sessionId || null,
       traceHint: clientContext?.traceHint || null,
       downstreamPath,
+      usageSource,
       errorMessage,
     });
     await insertProxyLog({

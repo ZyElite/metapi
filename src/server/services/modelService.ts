@@ -11,8 +11,8 @@ import {
 } from './accountTokenService.js';
 import {
   getCredentialModeFromExtraConfig,
-  getProxyUrlFromExtraConfig,
   mergeAccountExtraConfig,
+  resolveProxyUrlFromExtraConfig,
   requiresManagedAccountTokens,
   resolvePlatformUserId,
   supportsDirectAccountRoutingConnection,
@@ -26,6 +26,7 @@ import { withAccountProxyOverride } from './siteProxy.js';
 import { isCodexPlatform } from './oauth/codexAccount.js';
 import { buildStoredOauthStateFromAccount, getOauthInfoFromAccount } from './oauth/oauthAccount.js';
 import { refreshOauthAccessTokenSingleflight } from './oauth/refreshSingleflight.js';
+import { listEnabledOauthRouteUnitsWithMembers } from './oauth/routeUnitService.js';
 import { requireSiteApiBaseUrl } from './siteApiEndpointService.js';
 import {
   discoverAntigravityModelsFromCloud,
@@ -107,6 +108,34 @@ export type ModelRefreshResult =
   | ModelRefreshSkippedResult
   | ModelRefreshFailureResult
   | ModelRefreshSuccessResult;
+
+type ModelDiscoveryAccountRow = typeof schema.accounts.$inferSelect;
+const REFRESHED_OAUTH_ACCOUNT = Symbol('refreshedOauthAccount');
+
+function throwWithRefreshedOauthAccount(error: unknown, account: ModelDiscoveryAccountRow): never {
+  if (error && typeof error === 'object') {
+    Object.defineProperty(error, REFRESHED_OAUTH_ACCOUNT, {
+      value: account,
+      configurable: true,
+    });
+    throw error;
+  }
+
+  const wrapped = new Error(String(error || 'oauth model discovery failed'));
+  Object.defineProperty(wrapped, REFRESHED_OAUTH_ACCOUNT, {
+    value: account,
+    configurable: true,
+  });
+  throw wrapped;
+}
+
+function getRefreshedOauthAccountFromError(error: unknown): ModelDiscoveryAccountRow | null {
+  if (!error || typeof error !== 'object') return null;
+  return (
+    (error as Record<symbol, ModelDiscoveryAccountRow | undefined>)[REFRESHED_OAUTH_ACCOUNT]
+    || null
+  );
+}
 
 function looksLikeHtmlJsonParseError(message: string): boolean {
   const lowered = String(message || '').trim().toLowerCase();
@@ -303,6 +332,42 @@ function shouldRetryModelDiscoveryWithOauthRefresh(error: unknown): boolean {
     || message.includes('unauthenticated');
 }
 
+async function retryOauthModelDiscoveryWithRefresh<T>(input: {
+  account: ModelDiscoveryAccountRow;
+  attempt: (account: ModelDiscoveryAccountRow) => Promise<T>;
+}): Promise<{ result: T; account: ModelDiscoveryAccountRow }> {
+  let discoveryAccount = input.account;
+
+  try {
+    return {
+      result: await input.attempt(discoveryAccount),
+      account: discoveryAccount,
+    };
+  } catch (error) {
+    if (!shouldRetryModelDiscoveryWithOauthRefresh(error)) {
+      throw error;
+    }
+
+    await refreshOauthAccessTokenSingleflight(discoveryAccount.id);
+    const refreshedAccount = await db.select().from(schema.accounts)
+      .where(eq(schema.accounts.id, discoveryAccount.id))
+      .get();
+    if (!refreshedAccount) {
+      throw error;
+    }
+
+    discoveryAccount = refreshedAccount;
+    try {
+      return {
+        result: await input.attempt(discoveryAccount),
+        account: discoveryAccount,
+      };
+    } catch (retryError) {
+      throwWithRefreshedOauthAccount(retryError, discoveryAccount);
+    }
+  }
+}
+
 export async function refreshModelsForAccount(
   accountId: number,
   options?: { allowInactive?: boolean },
@@ -320,7 +385,7 @@ export async function refreshModelsForAccount(
   const site = row.sites;
   const oauth = getOauthInfoFromAccount(account);
   const adapter = getAdapter(site.platform);
-  const accountProxyUrl = getProxyUrlFromExtraConfig(account.extraConfig);
+  const accountProxyUrl = resolveProxyUrlFromExtraConfig(account.extraConfig);
 
   const restoreAvailabilityOnFailure = options?.allowInactive === true;
   const previousAccountTokens = restoreAvailabilityOnFailure
@@ -405,13 +470,18 @@ export async function refreshModelsForAccount(
   if (oauth?.provider === 'codex') {
     const checkedAt = new Date().toISOString();
     const startedAt = Date.now();
+    let discoveryAccount = account;
     try {
-      const codexModels = await withTimeout(
-        () => withAccountProxyOverride(accountProxyUrl,
-          () => discoverCodexModelsFromCloud({ site, account })),
-        MODEL_DISCOVERY_TIMEOUT_MS,
-        `codex model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-      );
+      const { result: codexModels, account: refreshedAccount } = await retryOauthModelDiscoveryWithRefresh({
+        account,
+        attempt: async (candidateAccount) => withTimeout(
+          () => withAccountProxyOverride(accountProxyUrl,
+            () => discoverCodexModelsFromCloud({ site, account: candidateAccount })),
+          MODEL_DISCOVERY_TIMEOUT_MS,
+          `codex model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+        ),
+      });
+      discoveryAccount = refreshedAccount;
       if (codexModels.length === 0) {
         throw new Error('未获取到可用模型');
       }
@@ -429,7 +499,7 @@ export async function refreshModelsForAccount(
         ).run();
       }
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'healthy',
         lastDiscoveredModels: codexModels,
@@ -449,11 +519,12 @@ export async function refreshModelsForAccount(
         discoveredApiToken: false,
       });
     } catch (err) {
+      discoveryAccount = getRefreshedOauthAccountFromError(err) || discoveryAccount;
       const rawMessage = (err as { message?: string })?.message || 'codex model discovery failed';
       const errorCode = classifyModelDiscoveryError(rawMessage);
       const errorMessage = `Codex 模型获取失败（${rawMessage}）`;
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'abnormal',
         lastModelSyncError: errorMessage,
@@ -480,13 +551,18 @@ export async function refreshModelsForAccount(
   if (oauth?.provider === 'claude') {
     const checkedAt = new Date().toISOString();
     const startedAt = Date.now();
+    let discoveryAccount = account;
     try {
-      const claudeModels = await withTimeout(
-        () => withAccountProxyOverride(accountProxyUrl,
-          () => discoverClaudeModelsFromCloud({ site, account })),
-        MODEL_DISCOVERY_TIMEOUT_MS,
-        `claude oauth model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-      );
+      const { result: claudeModels, account: refreshedAccount } = await retryOauthModelDiscoveryWithRefresh({
+        account,
+        attempt: async (candidateAccount) => withTimeout(
+          () => withAccountProxyOverride(accountProxyUrl,
+            () => discoverClaudeModelsFromCloud({ site, account: candidateAccount })),
+          MODEL_DISCOVERY_TIMEOUT_MS,
+          `claude oauth model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+        ),
+      });
+      discoveryAccount = refreshedAccount;
       if (claudeModels.length === 0) {
         throw new Error('未获取到可用模型');
       }
@@ -503,7 +579,7 @@ export async function refreshModelsForAccount(
         ).run();
       }
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'healthy',
         lastDiscoveredModels: claudeModels,
@@ -523,11 +599,12 @@ export async function refreshModelsForAccount(
         discoveredApiToken: false,
       });
     } catch (err) {
+      discoveryAccount = getRefreshedOauthAccountFromError(err) || discoveryAccount;
       const rawMessage = (err as { message?: string })?.message || 'claude oauth model discovery failed';
       const errorCode = classifyModelDiscoveryError(rawMessage);
       const errorMessage = `Claude OAuth 模型获取失败（${rawMessage}）`;
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'abnormal',
         lastModelSyncError: errorMessage,
@@ -647,13 +724,18 @@ export async function refreshModelsForAccount(
   if (oauth?.provider === 'antigravity') {
     const checkedAt = new Date().toISOString();
     const startedAt = Date.now();
+    let discoveryAccount = account;
     try {
-      const antigravityModels = await withTimeout(
-        () => withAccountProxyOverride(accountProxyUrl,
-          () => discoverAntigravityModelsFromCloud({ site, account })),
-        MODEL_DISCOVERY_TIMEOUT_MS,
-        `antigravity model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
-      );
+      const { result: antigravityModels, account: refreshedAccount } = await retryOauthModelDiscoveryWithRefresh({
+        account,
+        attempt: async (candidateAccount) => withTimeout(
+          () => withAccountProxyOverride(accountProxyUrl,
+            () => discoverAntigravityModelsFromCloud({ site, account: candidateAccount })),
+          MODEL_DISCOVERY_TIMEOUT_MS,
+          `antigravity model discovery timeout (${Math.round(MODEL_DISCOVERY_TIMEOUT_MS / 1000)}s)`,
+        ),
+      });
+      discoveryAccount = refreshedAccount;
       if (antigravityModels.length === 0) {
         throw new Error('未获取到可用模型');
       }
@@ -671,7 +753,7 @@ export async function refreshModelsForAccount(
         ).run();
       }
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'healthy',
         lastDiscoveredModels: antigravityModels,
@@ -691,11 +773,12 @@ export async function refreshModelsForAccount(
         discoveredApiToken: false,
       });
     } catch (err) {
+      discoveryAccount = getRefreshedOauthAccountFromError(err) || discoveryAccount;
       const rawMessage = (err as { message?: string })?.message || 'antigravity model discovery failed';
       const errorCode = classifyModelDiscoveryError(rawMessage);
       const errorMessage = `Antigravity 模型获取失败（${rawMessage}）`;
       await updateOauthModelDiscoveryState({
-        account,
+        account: discoveryAccount,
         checkedAt,
         status: 'abnormal',
         lastModelSyncError: errorMessage,
@@ -1022,16 +1105,56 @@ export async function rebuildTokenRoutesFromAvailability() {
     return globalAllowedModels.has(modelName.toLowerCase().trim());
   }
 
-  const modelCandidates = new Map<string, Map<string, { accountId: number; tokenId: number | null }>>();
-  const addModelCandidate = (modelNameRaw: string | null | undefined, accountId: number, tokenId: number | null, siteId: number) => {
+  const enabledOauthRouteUnits = await listEnabledOauthRouteUnitsWithMembers();
+  const routeUnitByAccountId = new Map<number, {
+    routeUnitId: number;
+    representativeAccountId: number;
+  }>();
+  for (const routeUnit of enabledOauthRouteUnits) {
+    const representativeAccountId = routeUnit.members[0]?.account.id;
+    if (!representativeAccountId) continue;
+    for (const member of routeUnit.members) {
+      routeUnitByAccountId.set(member.account.id, {
+        routeUnitId: routeUnit.unit.id,
+        representativeAccountId,
+      });
+    }
+  }
+
+  const modelCandidates = new Map<string, Map<string, {
+    accountId: number;
+    tokenId: number | null;
+    oauthRouteUnitId: number | null;
+  }>>();
+  const buildCandidateKey = (input: {
+    accountId: number;
+    tokenId: number | null;
+    oauthRouteUnitId: number | null;
+  }) => (
+    input.oauthRouteUnitId
+      ? `route-unit:${input.oauthRouteUnitId}`
+      : `${input.accountId}:${input.tokenId ?? 'account'}`
+  );
+  const buildChannelKey = (channel: typeof schema.routeChannels.$inferSelect) => (
+    channel.oauthRouteUnitId
+      ? `route-unit:${channel.oauthRouteUnitId}`
+      : `${channel.accountId}:${channel.tokenId ?? 'account'}`
+  );
+  const addModelCandidate = (
+    modelNameRaw: string | null | undefined,
+    accountId: number,
+    tokenId: number | null,
+    siteId: number,
+    oauthRouteUnitId: number | null = null,
+  ) => {
     const modelName = (modelNameRaw || '').trim();
     if (!modelName) return;
     if (!isModelAllowedByWhitelist(modelName)) return;
     if (isModelDisabledForSite(siteId, modelName)) return;
     if (blockedBrandRules.length > 0 && isModelBlockedByBrand(modelName, blockedBrandRules)) return;
     if (!modelCandidates.has(modelName)) modelCandidates.set(modelName, new Map());
-    const candidateKey = `${accountId}:${tokenId ?? 'account'}`;
-    modelCandidates.get(modelName)!.set(candidateKey, { accountId, tokenId });
+    const candidate = { accountId, tokenId, oauthRouteUnitId };
+    modelCandidates.get(modelName)!.set(buildCandidateKey(candidate), candidate);
   };
 
   for (const row of usableTokenRows) {
@@ -1040,6 +1163,17 @@ export async function rebuildTokenRoutesFromAvailability() {
 
   for (const row of accountRows) {
     if (!supportsDirectAccountRoutingConnection(row.accounts)) continue;
+    const routeUnit = routeUnitByAccountId.get(row.accounts.id);
+    if (routeUnit) {
+      addModelCandidate(
+        row.model_availability.modelName,
+        routeUnit.representativeAccountId,
+        null,
+        row.accounts.siteId,
+        routeUnit.routeUnitId,
+      );
+      continue;
+    }
     addModelCandidate(row.model_availability.modelName, row.accounts.id, null, row.accounts.siteId);
   }
 
@@ -1071,16 +1205,14 @@ export async function rebuildTokenRoutesFromAvailability() {
     const desiredKeys = new Set(Array.from(candidateMap.keys()));
 
     for (const [candidateKey, candidate] of candidateMap.entries()) {
-      const exists = routeChannels.some((channel) => (
-        channel.accountId === candidate.accountId
-        && (channel.tokenId ?? null) === candidate.tokenId
-      ));
+      const exists = routeChannels.some((channel) => buildChannelKey(channel) === candidateKey);
       if (exists) continue;
 
       const inserted = await db.insert(schema.routeChannels).values({
         routeId: route.id,
         accountId: candidate.accountId,
         tokenId: candidate.tokenId,
+        oauthRouteUnitId: candidate.oauthRouteUnitId,
         priority: 0,
         weight: 10,
         enabled: true,
@@ -1096,7 +1228,7 @@ export async function rebuildTokenRoutesFromAvailability() {
     }
 
     for (const channel of routeChannels) {
-      const channelKey = `${channel.accountId}:${channel.tokenId ?? 'account'}`;
+      const channelKey = buildChannelKey(channel);
       if (desiredKeys.has(channelKey)) {
         continue;
       }

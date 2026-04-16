@@ -44,14 +44,17 @@ import {
   startModelAvailabilityProbeScheduler,
   stopModelAvailabilityProbeScheduler,
 } from '../../services/modelAvailabilityProbeService.js';
+import { parsePayloadRulesConfigInput } from '../../services/payloadRules.js';
 
 type RoutingWeights = typeof config.routingWeights;
 
 interface RuntimeSettingsBody {
   proxyToken?: string;
   systemProxyUrl?: string;
+  payloadRules?: unknown;
   modelAvailabilityProbeEnabled?: boolean;
   codexUpstreamWebsocketEnabled?: boolean;
+  responsesCompactFallbackToResponsesEnabled?: boolean;
   disableCrossProtocolFallback?: boolean;
   proxySessionChannelConcurrencyLimit?: number;
   proxySessionChannelQueueWaitMs?: number;
@@ -425,6 +428,11 @@ function applyImportedSettingToRuntime(key: string, value: unknown) {
       config.codexUpstreamWebsocketEnabled = value;
       return;
     }
+    case 'responses_compact_fallback_to_responses_enabled': {
+      if (typeof value !== 'boolean') return;
+      config.responsesCompactFallbackToResponsesEnabled = value;
+      return;
+    }
     case 'disable_cross_protocol_fallback': {
       if (typeof value !== 'boolean') return;
       config.disableCrossProtocolFallback = value;
@@ -711,6 +719,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     logCleanupRetentionDays: config.logCleanupRetentionDays,
     modelAvailabilityProbeEnabled: config.modelAvailabilityProbeEnabled,
     codexUpstreamWebsocketEnabled: config.codexUpstreamWebsocketEnabled,
+    responsesCompactFallbackToResponsesEnabled: config.responsesCompactFallbackToResponsesEnabled,
     disableCrossProtocolFallback: config.disableCrossProtocolFallback,
     proxySessionChannelConcurrencyLimit: config.proxySessionChannelConcurrencyLimit,
     proxySessionChannelQueueWaitMs: config.proxySessionChannelQueueWaitMs,
@@ -752,6 +761,7 @@ function getRuntimeSettingsResponse(currentAdminIp = '') {
     currentAdminIp,
     serverTimeZone: getResolvedTimeZone(),
     systemProxyUrl: config.systemProxyUrl,
+    payloadRules: config.payloadRules,
     proxyErrorKeywords: config.proxyErrorKeywords,
     proxyEmptyContentFailEnabled: config.proxyEmptyContentFailEnabled,
     proxyTokenMasked: maskSecret(config.proxyToken),
@@ -895,6 +905,7 @@ export async function settingsRoutes(app: FastifyInstance) {
     const body = parsedBody.data as RuntimeSettingsBody;
     const changedLabels: string[] = [];
     const currentRequestIp = extractClientIp(request.ip, request.headers['x-forwarded-for']);
+    let pendingPayloadRules: typeof config.payloadRules | undefined;
 
     const webhookTouched = body.webhookUrl !== undefined || body.webhookEnabled !== undefined;
     const nextWebhookUrl = body.webhookUrl !== undefined
@@ -1125,6 +1136,23 @@ export async function settingsRoutes(app: FastifyInstance) {
       invalidateSiteProxyCache();
     }
 
+    if (body.payloadRules !== undefined) {
+      const parsedPayloadRules = parsePayloadRulesConfigInput(body.payloadRules);
+      if (!parsedPayloadRules.success) {
+        return reply.code(400).send({
+          success: false,
+          message: parsedPayloadRules.message,
+        });
+      }
+
+      const previousRules = JSON.stringify(config.payloadRules);
+      const nextRules = JSON.stringify(parsedPayloadRules.normalized);
+      if (previousRules !== nextRules) {
+        changedLabels.push('Payload 规则');
+      }
+      pendingPayloadRules = parsedPayloadRules.normalized;
+    }
+
     if (body.modelAvailabilityProbeEnabled !== undefined) {
       let nextValue = false;
       try {
@@ -1164,6 +1192,24 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.codexUpstreamWebsocketEnabled = nextValue;
       upsertSetting('codex_upstream_websocket_enabled', config.codexUpstreamWebsocketEnabled);
+    }
+
+    if (body.responsesCompactFallbackToResponsesEnabled !== undefined) {
+      let nextValue = false;
+      try {
+        nextValue = parseBooleanFlag(body.responsesCompactFallbackToResponsesEnabled, 'Compact 回退到 Responses 开关');
+      } catch (err: any) {
+        return reply.code(400).send({
+          success: false,
+          message: err?.message || 'Compact 回退到 Responses 开关格式无效',
+        });
+      }
+
+      if (nextValue !== config.responsesCompactFallbackToResponsesEnabled) {
+        changedLabels.push('Compact 不支持时回退到普通 Responses');
+      }
+      config.responsesCompactFallbackToResponsesEnabled = nextValue;
+      upsertSetting('responses_compact_fallback_to_responses_enabled', config.responsesCompactFallbackToResponsesEnabled);
     }
 
     if (body.disableCrossProtocolFallback !== undefined) {
@@ -1670,6 +1716,11 @@ export async function settingsRoutes(app: FastifyInstance) {
       }
       config.tokenRouterFailureCooldownMaxSec = normalized;
       upsertSetting('token_router_failure_cooldown_max_sec', normalized);
+    }
+
+    if (pendingPayloadRules !== undefined) {
+      config.payloadRules = pendingPayloadRules;
+      await upsertSetting('payload_rules', pendingPayloadRules);
     }
 
     if (changedLabels.length > 0) {

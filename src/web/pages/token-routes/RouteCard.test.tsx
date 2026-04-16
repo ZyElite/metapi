@@ -1,6 +1,27 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, create, type ReactTestInstance } from 'react-test-renderer';
 import { SortableContext } from '@dnd-kit/sortable';
+
+const sortableState = vi.hoisted(() => ({
+  activeId: null as number | string | null,
+}));
+
+vi.mock('@dnd-kit/sortable', async () => {
+  const actual = await vi.importActual<typeof import('@dnd-kit/sortable')>('@dnd-kit/sortable');
+  return {
+    ...actual,
+    useSortable: ({ id }: { id: number | string }) => ({
+      attributes: {},
+      listeners: {},
+      setNodeRef: vi.fn(),
+      setActivatorNodeRef: vi.fn(),
+      transform: null,
+      transition: null,
+      isDragging: sortableState.activeId === id,
+    }),
+  };
+});
+
 import RouteCard from './RouteCard.js';
 import type { RouteChannel, RouteSummaryRow } from './types.js';
 import { getRouteRoutingStrategyDescription } from './routingStrategy.js';
@@ -12,6 +33,10 @@ function collectText(node: ReactTestInstance): string {
     return collectText(child);
   }).join('');
 }
+
+afterEach(() => {
+  sortableState.activeId = null;
+});
 
 const LONG_REGEX_PATTERN = 're:(?:.*|.*/)(minimax-m2.1)$';
 
@@ -53,6 +78,73 @@ function buildChannel(overrides: Partial<RouteChannel> = {}): RouteChannel {
 }
 
 describe('RouteCard', () => {
+  it('renders oauth route unit summary and member labels on expanded channels', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute({
+          modelPattern: 'gpt-4.1',
+          displayName: 'gpt-4.1',
+          channelCount: 1,
+          enabledChannelCount: 1,
+        })}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[
+          buildChannel({
+            account: { username: 'route-unit-anchor' },
+            routeUnit: {
+              id: 'pool-1',
+              name: 'Codex Pool A',
+              strategy: 'round_robin',
+              memberCount: 3,
+              members: [
+                { accountId: 101, username: 'route-unit-anchor', siteName: 'site-a' },
+                { accountId: 102, username: 'route-unit-backup', siteName: 'site-b' },
+                { accountId: 103, username: 'route-unit-third', siteName: 'site-c' },
+              ],
+            },
+          }),
+        ]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('Codex Pool A');
+    expect(text).toContain('3 个成员');
+    expect(text).toContain('轮询');
+    expect(text).toContain('成员摘要');
+    expect(text).toContain('route-unit-anchor');
+    expect(text).toContain('route-unit-backup');
+    expect(text).toContain('route-unit-third');
+  });
+
   it('truncates the collapsed regex badge while keeping the group name primary', () => {
     const root = create(
       <RouteCard
@@ -346,6 +438,70 @@ describe('RouteCard', () => {
     expect(p0RailNode.props.style.color).not.toBe(p1RailNode.props.style.color);
   });
 
+  it('renders oauth route unit summary badges on expanded cards', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute()}
+        brand={null}
+        expanded
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[
+          buildChannel({
+            id: 11,
+            account: { username: 'pool-representative' },
+            site: { id: 1, name: 'site-a', platform: 'openai' },
+            ...( {
+              routeUnit: {
+                id: 7,
+                name: 'Codex 池',
+                memberCount: 3,
+                strategy: 'round_robin',
+                members: [
+                  { accountId: 101, username: 'user_a', siteName: 'site-a' },
+                  { accountId: 102, username: 'user_b', siteName: 'site-b' },
+                  { accountId: 103, username: 'user_c', siteName: 'site-c' },
+                ],
+              },
+            } as any ),
+          }),
+        ]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const text = collectText(root.root);
+    expect(text).toContain('OAuth 路由池');
+    expect(text).toContain('Codex 池');
+    expect(text).toContain('3 个成员');
+    expect(text).toContain('轮询');
+    expect(text).toContain('成员摘要');
+  });
+
   it('uses translate-only rect sorting for flat channel shell rows', () => {
     const root = create(
       <RouteCard
@@ -388,6 +544,141 @@ describe('RouteCard', () => {
 
     const sortableContext = root.root.findByType(SortableContext);
     expect(sortableContext.props.strategy).toBe(translateOnlyRectSortingStrategy);
+  });
+
+  it('shows a new-layer drop target while dragging inside compact desktop detail panels', () => {
+    const renderCard = () => (
+      <RouteCard
+        route={buildRoute()}
+        brand={null}
+        expanded
+        compact
+        detailPanel
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[
+          buildChannel({ id: 11, priority: 0 }),
+          buildChannel({ id: 12, accountId: 102, tokenId: 1002, priority: 0 }),
+        ]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />
+    );
+    const root = create(renderCard());
+
+    const dndContext = root.root.find((node) => (
+      typeof node.props.onDragStart === 'function'
+      && typeof node.props.onDragEnd === 'function'
+      && typeof node.props.onDragCancel === 'function'
+    ));
+
+    act(() => {
+      sortableState.activeId = 12;
+      dndContext.props.onDragStart?.({
+        active: { id: 12 },
+      });
+      root.update(renderCard());
+    });
+
+    expect(collectText(root.root)).toContain('放到新档位');
+    const shells = root.root.findAll((node) => (
+      node.type === 'div'
+      && node.props['data-testid'] === 'route-channel-shell'
+    ));
+    const activeShell = shells.find((node) => node.props['data-channel-id'] === 12);
+    expect(activeShell).toBeDefined();
+    expect(activeShell?.props.style.visibility).toBe('hidden');
+
+    const newLayerTarget = root.root.find((node) => (
+      node.type === 'div'
+      && node.props['data-testid'] === 'route-priority-new-layer-target'
+    ));
+    expect(newLayerTarget.props.style.display).toBe('flex');
+    expect(newLayerTarget.props.style.minHeight).toBe(34);
+  });
+
+  it('keeps compact desktop detail bucket headers outside draggable channel shells', () => {
+    const root = create(
+      <RouteCard
+        route={buildRoute()}
+        brand={null}
+        expanded
+        compact
+        detailPanel
+        onToggleExpand={vi.fn()}
+        onEdit={vi.fn()}
+        onDelete={vi.fn()}
+        onToggleEnabled={vi.fn()}
+        onClearCooldown={vi.fn()}
+        clearingCooldown={false}
+        onRoutingStrategyChange={vi.fn()}
+        updatingRoutingStrategy={false}
+        channels={[
+          buildChannel({ id: 11, priority: 0 }),
+          buildChannel({ id: 12, accountId: 102, tokenId: 1002, priority: 0 }),
+          buildChannel({ id: 21, accountId: 103, tokenId: 1003, priority: 1 }),
+        ]}
+        loadingChannels={false}
+        routeDecision={null}
+        loadingDecision={false}
+        candidateView={{ routeCandidates: [], accountOptions: [], tokenOptionsByAccountId: {} }}
+        channelTokenDraft={{}}
+        updatingChannel={{}}
+        savingPriority={false}
+        onTokenDraftChange={vi.fn()}
+        onSaveToken={vi.fn()}
+        onDeleteChannel={vi.fn()}
+        onToggleChannelEnabled={vi.fn()}
+        onChannelDragEnd={vi.fn()}
+        missingTokenSiteItems={[]}
+        missingTokenGroupItems={[]}
+        onCreateTokenForMissing={vi.fn()}
+        onAddChannel={vi.fn()}
+        onSiteBlockModel={vi.fn()}
+        expandedSourceGroupMap={{}}
+        onToggleSourceGroup={vi.fn()}
+      />,
+    );
+
+    const bucketHeaders = root.root.findAll((node) => (
+      node.type === 'div'
+      && node.props['data-testid'] === 'route-priority-bucket-header'
+    ));
+    const shells = root.root.findAll((node) => (
+      node.type === 'div'
+      && node.props['data-testid'] === 'route-channel-shell'
+    ));
+
+    expect(bucketHeaders.map((node) => collectText(node))).toEqual([
+      'P0 · 2 通道',
+      'P1 · 1 通道',
+    ]);
+    expect(shells).toHaveLength(3);
+    expect(collectText(shells[0]!)).not.toContain('P0 · 2 通道');
+    expect(collectText(shells[2]!)).not.toContain('P1 · 1 通道');
   });
 
   it('renders desktop channel rows in sortable shell order within a single sortable list', () => {
