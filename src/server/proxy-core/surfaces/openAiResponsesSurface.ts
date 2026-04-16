@@ -538,6 +538,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
         const endpointStrategy = openAiResponsesTransformer.compatibility.createEndpointStrategy({
           isStream: isStream || forceCodexUpstreamStream,
           requiresNativeResponsesFileUrl,
+          sitePlatform: selected.site.platform,
           dispatchRequest,
         });
         const tryRecover = async (ctx: Parameters<NonNullable<typeof endpointStrategy.tryRecover>>[0]) => {

@@ -11,6 +11,7 @@ import {
   shouldDowngradeResponsesChatToMessages,
   shouldRetryResponsesCompatibility,
 } from './compatibility.js';
+import { normalizeCodexResponsesBodyForProxy } from './codexCompatibility.js';
 
 type CompatibilityRequest = {
   endpoint: CompatibilityEndpoint;
@@ -38,6 +39,7 @@ type UpstreamResponse = Exclude<EndpointRecoverResult, null>['upstream'];
 type CreateResponsesEndpointStrategyInput = {
   isStream: boolean;
   requiresNativeResponsesFileUrl: boolean;
+  sitePlatform: string;
   dispatchRequest: (
     request: CompatibilityRequest,
     targetUrl?: string,
@@ -45,6 +47,10 @@ type CreateResponsesEndpointStrategyInput = {
 };
 
 export function createResponsesEndpointStrategy(input: CreateResponsesEndpointStrategyInput) {
+  const normalizeRetryBody = (body: Record<string, unknown>) => (
+    normalizeCodexResponsesBodyForProxy(body, input.sitePlatform)
+  );
+
   return {
     async tryRecover(ctx: EndpointAttemptContext): Promise<EndpointRecoverResult> {
       if (shouldRetryResponsesCompatibility({
@@ -63,7 +69,7 @@ export function createResponsesEndpointStrategy(input: CreateResponsesEndpointSt
             const compatibilityRequest = {
               ...ctx.request,
               headers: compatibilityHeadersCandidate,
-              body: compatibilityBody,
+              body: normalizeRetryBody(compatibilityBody),
             };
             const compatibilityResponse = await input.dispatchRequest(
               compatibilityRequest,
@@ -94,6 +100,7 @@ export function createResponsesEndpointStrategy(input: CreateResponsesEndpointSt
           endpoint: ctx.request.endpoint,
           stream: input.isStream,
         }),
+        body: normalizeRetryBody(ctx.request.body),
       };
       const minimalResponse = await input.dispatchRequest(minimalRequest, ctx.targetUrl);
       if (minimalResponse.ok) {

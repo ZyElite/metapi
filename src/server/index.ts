@@ -292,7 +292,32 @@ app.addHook('onClose', async () => {
 
 // Start server
 try {
-  await app.listen({ port: config.port, host: config.listenHost });
+  // Fastify expands 0.0.0.0 through os.networkInterfaces() when using app.listen().
+  await app.ready();
+  await new Promise<void>((resolve, reject) => {
+    const handleError = (error: Error) => {
+      app.server.removeListener('listening', handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      app.server.removeListener('error', handleError);
+      const boundAddress = app.server.address();
+      if (typeof boundAddress === 'string') {
+        app.log.info(`Server listening at ${boundAddress}`);
+      } else if (boundAddress) {
+        const host = boundAddress.family === 'IPv6'
+          ? `[${boundAddress.address}]`
+          : boundAddress.address;
+        app.log.info(`Server listening at http://${host}:${boundAddress.port}`);
+      } else {
+        app.log.info(`Server listening on ${config.listenHost}:${config.port}`);
+      }
+      resolve();
+    };
+    app.server.once('error', handleError);
+    app.server.once('listening', handleListening);
+    app.server.listen({ port: config.port, host: config.listenHost });
+  });
   const summaryLines = buildStartupSummaryLines({
     port: config.port,
     host: config.listenHost,

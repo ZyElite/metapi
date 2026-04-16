@@ -11,7 +11,21 @@ if (!token) {
 const app = await buildUpdateHelperApp({ token });
 
 try {
-  await app.listen({ port, host });
+  // Fastify expands 0.0.0.0 through os.networkInterfaces() when using app.listen().
+  await app.ready();
+  await new Promise<void>((resolve, reject) => {
+    const handleError = (error: Error) => {
+      app.server.removeListener('listening', handleListening);
+      reject(error);
+    };
+    const handleListening = () => {
+      app.server.removeListener('error', handleError);
+      resolve();
+    };
+    app.server.once('error', handleError);
+    app.server.once('listening', handleListening);
+    app.server.listen({ port, host });
+  });
   app.log.info(`Deploy helper listening on http://${host}:${port}`);
 } catch (error) {
   app.log.error(error);
