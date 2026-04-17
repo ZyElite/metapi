@@ -906,6 +906,55 @@ describe('account tokens sync routes with site status', () => {
     expect((tokenRows[0] as any).valueStatus).toBe('ready');
   });
 
+  it('reuses the same ready token when upstream changes token name for the same token value', async () => {
+    const { account } = await seedAccount({ siteStatus: 'active' });
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'old-name',
+      token: 'sk-shared-token',
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    getApiTokensMock.mockResolvedValue([
+      { name: 'renamed-token', key: 'sk-shared-token', enabled: true, tokenGroup: 'vip' },
+    ]);
+    getApiTokenMock.mockResolvedValue(null);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/account-tokens/sync/${account.id}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      success: true,
+      synced: true,
+      status: 'synced',
+      created: 0,
+      updated: 1,
+      total: 1,
+    });
+
+    const tokenRows = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokenRows).toHaveLength(1);
+    expect(tokenRows[0]).toMatchObject({
+      name: 'renamed-token',
+      token: 'sk-shared-token',
+      tokenGroup: 'vip',
+      enabled: true,
+      isDefault: true,
+      source: 'sync',
+    });
+    expect((tokenRows[0] as any).valueStatus).toBe('ready');
+  });
+
   it('does not allow setting a masked_pending placeholder as default', async () => {
     const { account } = await seedAccount({ siteStatus: 'active' });
     const token = await db.insert(schema.accountTokens).values({

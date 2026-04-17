@@ -316,32 +316,6 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
       ? ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
       : ACCOUNT_TOKEN_VALUE_STATUS_READY;
 
-    const byToken = existing.find((row) => (
-      row.token === tokenValue
-      && resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY
-    ));
-    if (byToken) {
-      await db.update(schema.accountTokens)
-        .set({
-          name: tokenName,
-          tokenGroup,
-          valueStatus: ACCOUNT_TOKEN_VALUE_STATUS_READY,
-          source: 'sync',
-          enabled,
-          updatedAt: now,
-        })
-        .where(eq(schema.accountTokens.id, byToken.id))
-        .run();
-      byToken.name = tokenName;
-      byToken.tokenGroup = tokenGroup;
-      byToken.valueStatus = ACCOUNT_TOKEN_VALUE_STATUS_READY;
-      byToken.enabled = enabled;
-      byToken.source = 'sync';
-      byToken.updatedAt = now;
-      updated++;
-      continue;
-    }
-
     const matchingReadyByMaskedValue = nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING
       ? existing.filter((row) => (
         resolveAccountTokenValueStatus(row) === ACCOUNT_TOKEN_VALUE_STATUS_READY
@@ -395,6 +369,34 @@ export async function syncTokensFromUpstream(accountId: number, upstreamTokens: 
       }
 
       updated++;
+      continue;
+    }
+
+    const byToken = existing.find((row) => row.token === tokenValue);
+    if (byToken) {
+      const nextEnabled = nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_READY ? enabled : false;
+      await db.update(schema.accountTokens)
+        .set({
+          name: tokenName,
+          tokenGroup,
+          valueStatus: nextValueStatus,
+          source: 'sync',
+          enabled: nextEnabled,
+          updatedAt: now,
+        })
+        .where(eq(schema.accountTokens.id, byToken.id))
+        .run();
+      byToken.name = tokenName;
+      byToken.tokenGroup = tokenGroup;
+      byToken.valueStatus = nextValueStatus;
+      byToken.enabled = nextEnabled;
+      byToken.source = 'sync';
+      byToken.updatedAt = now;
+      updated++;
+      if (nextValueStatus === ACCOUNT_TOKEN_VALUE_STATUS_MASKED_PENDING) {
+        maskedPending++;
+        pendingTokenIds.push(byToken.id);
+      }
       continue;
     }
 

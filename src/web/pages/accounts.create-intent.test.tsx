@@ -87,6 +87,61 @@ describe('Accounts create intent handling', () => {
     }
   });
 
+  it('refreshes the snapshot before opening create intent when the requested site is missing from the first payload', async () => {
+    const staleSites = [
+      { id: 9, name: 'Existing Site', platform: 'new-api', status: 'active' },
+    ];
+    const freshSites = [
+      ...staleSites,
+      { id: 12, name: 'Fresh Site', url: 'https://fresh.example.com', platform: 'openai', status: 'active' },
+    ];
+
+    apiMock.getAccountsSnapshot.mockReset();
+    apiMock.getAccountsSnapshot
+      .mockImplementationOnce(async (options?: { refresh?: boolean }) => {
+        expect(options).toBeUndefined();
+        return {
+          generatedAt: '2026-04-09T00:00:00.000Z',
+          accounts: [],
+          sites: staleSites,
+        };
+      })
+      .mockImplementationOnce(async (options?: { refresh?: boolean }) => {
+        expect(options).toEqual({ refresh: true });
+        return {
+          generatedAt: '2026-04-09T00:00:01.000Z',
+          accounts: [],
+          sites: freshSites,
+        };
+      });
+
+    const root = await renderAccounts('/accounts?segment=apikey&create=1&siteId=12', freshSites);
+    try {
+      await flushMicrotasks();
+
+      const rendered = JSON.stringify(root.toJSON());
+      expect(rendered).toContain('添加 API Key 连接');
+
+      const selects = root.root.findAllByType(ModernSelect);
+      expect(selects[1]?.props.value).toBe('12');
+      expect(selects[1]?.props.options).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            value: '12',
+            label: 'Fresh Site (openai)',
+            description: 'https://fresh.example.com',
+          }),
+        ]),
+      );
+
+      expect(apiMock.getAccountsSnapshot).toHaveBeenCalledTimes(2);
+      expect(apiMock.getAccountsSnapshot).toHaveBeenNthCalledWith(1, undefined);
+      expect(apiMock.getAccountsSnapshot).toHaveBeenNthCalledWith(2, { refresh: true });
+    } finally {
+      root?.unmount();
+    }
+  });
+
   it('uses searchable site selectors for manual connection creation', async () => {
     const root = await renderAccounts('/accounts', [
       { id: 10, name: 'Demo Site', url: 'https://demo.example.com', platform: 'new-api', status: 'active' },

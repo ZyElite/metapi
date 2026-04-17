@@ -192,6 +192,7 @@ export default function Accounts() {
   });
   const rowRefs = useRef<Map<number, HTMLTableRowElement>>(new Map());
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCreateSiteRefreshRef = useRef<number | null>(null);
   const lastRebindTargetRef = useRef<any | null>(null);
   const modelModalRequestSeqRef = useRef(0);
   const toast = useToast();
@@ -338,7 +339,23 @@ export default function Accounts() {
     const params = new URLSearchParams(location.search);
     const shouldOpenCreate = isTruthyFlag(params.get("create"));
     const requestedSiteId = parsePositiveInt(params.get("siteId"));
-    if (!shouldOpenCreate || !requestedSiteId) return;
+    if (!shouldOpenCreate || !requestedSiteId) {
+      pendingCreateSiteRefreshRef.current = null;
+      return;
+    }
+
+    const requestedSiteExists = sites.some((site) => site.id === requestedSiteId);
+    if (
+      !requestedSiteExists &&
+      pendingCreateSiteRefreshRef.current !== requestedSiteId
+    ) {
+      pendingCreateSiteRefreshRef.current = requestedSiteId;
+      setLoaded(false);
+      void load(true);
+      return;
+    }
+
+    pendingCreateSiteRefreshRef.current = null;
 
     const credentialMode = activeSegment === "apikey" ? "apikey" : "session";
     const initializationPreset = getSiteInitializationPreset(
@@ -372,7 +389,7 @@ export default function Accounts() {
       },
       { replace: true },
     );
-  }, [activeSegment, loaded, location.pathname, location.search, navigate]);
+  }, [activeSegment, loaded, location.pathname, location.search, navigate, sites]);
 
   useEffect(() => {
     return () => {

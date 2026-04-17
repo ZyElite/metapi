@@ -6,11 +6,31 @@ import { join } from 'node:path';
 import { eq } from 'drizzle-orm';
 
 const verifyTokenMock = vi.fn();
+const refreshBalanceMock = vi.fn();
+const refreshModelsForAccountMock = vi.fn();
+const rebuildRoutesOnlyMock = vi.fn();
 
 vi.mock('../../services/platforms/index.js', () => ({
   getAdapter: () => ({
     verifyToken: (...args: unknown[]) => verifyTokenMock(...args),
   }),
+}));
+
+vi.mock('../../services/balanceService.js', () => ({
+  refreshBalance: (...args: unknown[]) => refreshBalanceMock(...args),
+}));
+
+vi.mock('../../services/modelService.js', async () => {
+  const actual = await vi.importActual<typeof import('../../services/modelService.js')>('../../services/modelService.js');
+  return {
+    ...actual,
+    refreshModelsForAccount: (...args: unknown[]) => refreshModelsForAccountMock(...args),
+  };
+});
+
+vi.mock('../../services/routeRefreshWorkflow.js', () => ({
+  rebuildRoutesOnly: (...args: unknown[]) => rebuildRoutesOnlyMock(...args),
+  rebuildRoutesBestEffort: vi.fn(),
 }));
 
 type DbModule = typeof import('../../db/index.js');
@@ -37,6 +57,21 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
 
   beforeEach(async () => {
     verifyTokenMock.mockReset();
+    refreshBalanceMock.mockReset();
+    refreshModelsForAccountMock.mockReset();
+    rebuildRoutesOnlyMock.mockReset();
+    refreshBalanceMock.mockResolvedValue({ success: true });
+    refreshModelsForAccountMock.mockResolvedValue({
+      refreshed: true,
+      status: 'success',
+      accountId: 0,
+      modelCount: 0,
+      modelsPreview: [],
+      tokenScanned: 0,
+      discoveredByCredential: false,
+      discoveredApiToken: false,
+    });
+    rebuildRoutesOnlyMock.mockResolvedValue({ success: true });
 
     await db.delete(schema.proxyLogs).run();
     await db.delete(schema.checkinLogs).run();
@@ -185,6 +220,62 @@ describe('accounts rebind-session api', { timeout: 15_000 }, () => {
     expect(latest?.apiToken).toBe('sk-rebound-token');
     expect(latest?.username).toBe('linuxdo_1002');
     expect(latest?.status).toBe('active');
+  });
+
+  it('does not duplicate account tokens when rebind updates apiToken for an existing default token', async () => {
+    verifyTokenMock.mockResolvedValueOnce({
+      tokenType: 'session',
+      userInfo: { username: 'linuxdo_1002' },
+      apiToken: 'sk-rebound-token',
+    });
+
+    const site = await db.insert(schema.sites).values({
+      name: 'Rebind Site',
+      url: 'https://rebind.example.com',
+      platform: 'new-api',
+    }).returning().get();
+
+    const account = await db.insert(schema.accounts).values({
+      siteId: site.id,
+      username: 'linuxdo_1001',
+      accessToken: 'old-access-token',
+      apiToken: 'sk-rebound-token',
+      status: 'expired',
+      extraConfig: JSON.stringify({ platformUserId: 1001 }),
+    }).returning().get();
+
+    await db.insert(schema.accountTokens).values({
+      accountId: account.id,
+      name: 'default',
+      token: 'sk-rebound-token',
+      source: 'sync',
+      enabled: true,
+      isDefault: true,
+      tokenGroup: 'default',
+      valueStatus: 'ready' as any,
+    }).run();
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/api/accounts/${account.id}/rebind-session`,
+      payload: {
+        accessToken: 'new-session-token',
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+
+    const tokens = await db.select()
+      .from(schema.accountTokens)
+      .where(eq(schema.accountTokens.accountId, account.id))
+      .all();
+    expect(tokens).toHaveLength(1);
+    expect(tokens[0]).toMatchObject({
+      name: 'default',
+      token: 'sk-rebound-token',
+      enabled: true,
+      isDefault: true,
+    });
   });
 
   it('stores managed sub2api refresh token fields when provided during rebind', async () => {
