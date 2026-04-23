@@ -10,6 +10,10 @@ const RESPONSES_TOOL_OUTPUT_TYPES = new Set([
   'function_call_output',
   'custom_tool_call_output',
 ]);
+const RESPONSES_FULL_TRANSCRIPT_REPLAY_TYPES = new Set([
+  'compaction',
+  'compaction_summary',
+]);
 
 const RESPONSES_TERMINAL_STATUSES = new Set([
   'completed',
@@ -56,6 +60,46 @@ function hasResponsesToolOutput(input: unknown): boolean {
   });
 }
 
+function hasResponsesFullTranscriptReplayItem(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => hasResponsesFullTranscriptReplayItem(item));
+  }
+  if (!isRecord(value)) return false;
+
+  const type = asTrimmedString(value.type).toLowerCase();
+  if (RESPONSES_FULL_TRANSCRIPT_REPLAY_TYPES.has(type)) {
+    return true;
+  }
+
+  const object = asTrimmedString(value.object).toLowerCase();
+  if (object === 'response.compaction') {
+    return true;
+  }
+
+  return (
+    hasResponsesFullTranscriptReplayItem(value.input)
+    || hasResponsesFullTranscriptReplayItem(value.content)
+    || hasResponsesFullTranscriptReplayItem(value.output)
+    || hasResponsesFullTranscriptReplayItem(value.summary)
+  );
+}
+
+function collectResponsesErrorText(input: {
+  rawErrText?: string | null;
+  payload?: unknown;
+}): string {
+  const fragments = [
+    ...collectResponsesErrorFragments(input.payload),
+  ];
+  const rawErrText = asTrimmedString(input.rawErrText);
+  if (rawErrText) fragments.push(rawErrText);
+  return fragments.join(' ').toLowerCase();
+}
+
+export function hasResponsesFullTranscriptReplayInput(value: unknown): boolean {
+  return hasResponsesFullTranscriptReplayItem(value);
+}
+
 export function shouldInferResponsesPreviousResponseId(
   body: Record<string, unknown> | null | undefined,
   candidatePreviousResponseId: unknown,
@@ -64,6 +108,7 @@ export function shouldInferResponsesPreviousResponseId(
   if (asTrimmedString(body.previous_response_id)) return false;
   const candidate = asTrimmedString(candidatePreviousResponseId);
   if (!candidate) return false;
+  if (hasResponsesFullTranscriptReplayInput(body.input)) return false;
   return hasResponsesToolOutput(body.input);
 }
 
@@ -92,16 +137,33 @@ export function isResponsesPreviousResponseNotFoundError(input: {
   rawErrText?: string | null;
   payload?: unknown;
 }): boolean {
-  const fragments = [
-    ...collectResponsesErrorFragments(input.payload),
-  ];
-  const rawErrText = asTrimmedString(input.rawErrText);
-  if (rawErrText) fragments.push(rawErrText);
-  const combined = fragments.join(' ').toLowerCase();
+  const combined = collectResponsesErrorText(input);
   if (!combined) return false;
   return (
     combined.includes('previous_response_not_found')
     || /previous[\s_-]*response(?:[\s_-]*(?:id|identifier))?[\s_-]*not[\s_-]*found/i.test(combined)
+  );
+}
+
+export function isResponsesPreviousResponseUnsupportedError(input: {
+  rawErrText?: string | null;
+  payload?: unknown;
+}): boolean {
+  const combined = collectResponsesErrorText(input);
+  if (!combined) return false;
+  return (
+    /(?:unsupported|unknown|unexpected|invalid)\s+parameter[s]?(?::\s*|\s+)['"`]?previous_response_id['"`]?/i.test(combined)
+    || /previous_response_id[^a-z0-9]+(?:is\s+)?not\s+supported/i.test(combined)
+  );
+}
+
+export function shouldRetryWithoutResponsesPreviousResponseId(input: {
+  rawErrText?: string | null;
+  payload?: unknown;
+}): boolean {
+  return (
+    isResponsesPreviousResponseNotFoundError(input)
+    || isResponsesPreviousResponseUnsupportedError(input)
   );
 }
 

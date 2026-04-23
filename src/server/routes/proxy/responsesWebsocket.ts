@@ -15,6 +15,7 @@ import { runWithSiteApiEndpointPool, SiteApiEndpointRequestError } from '../../s
 import { tokenRouter } from '../../services/tokenRouter.js';
 import { buildOauthProviderHeaders } from '../../services/oauth/service.js';
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
+import { hasResponsesFullTranscriptReplayInput } from '../../transformers/openai/responses/continuation.js';
 import { buildUpstreamEndpointRequest } from './upstreamEndpoint.js';
 import { config } from '../../config.js';
 
@@ -239,12 +240,24 @@ function normalizeResponsesWebsocketRequest(
     next.instructions = cloneJsonObject(lastRequest.instructions);
   }
 
-  if (supportsIncrementalInput && requestType === 'response.create' && asTrimmedString(parsed.previous_response_id)) {
-    return {
-      ok: true,
-      request: next,
-      nextRequestSnapshot: cloneJsonObject(next),
-    };
+  if (supportsIncrementalInput && requestType === 'response.create') {
+    if (hasResponsesFullTranscriptReplayInput(parsed.input)) {
+      delete next.previous_response_id;
+      next.input = cloneJsonObject(parsed.input);
+      return {
+        ok: true,
+        request: next,
+        nextRequestSnapshot: cloneJsonObject(next),
+      };
+    }
+
+    if (asTrimmedString(parsed.previous_response_id)) {
+      return {
+        ok: true,
+        request: next,
+        nextRequestSnapshot: cloneJsonObject(next),
+      };
+    }
   }
 
   const mergedInput = [

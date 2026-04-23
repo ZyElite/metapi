@@ -6,8 +6,8 @@ import { hasProxyUsagePayload, mergeProxyUsage, parseProxyUsage } from '../../se
 import { openAiResponsesTransformer } from '../../transformers/openai/responses/index.js';
 import {
   extractResponsesTerminalResponseId,
-  isResponsesPreviousResponseNotFoundError,
   shouldInferResponsesPreviousResponseId,
+  shouldRetryWithoutResponsesPreviousResponseId,
   stripResponsesPreviousResponseId,
   withResponsesPreviousResponseId,
 } from '../../transformers/openai/responses/continuation.js';
@@ -600,7 +600,7 @@ export async function handleOpenAiResponsesSurfaceRequest(
           }
           if (
             ctx.request.endpoint === 'responses'
-            && isResponsesPreviousResponseNotFoundError({
+            && shouldRetryWithoutResponsesPreviousResponseId({
               rawErrText: ctx.rawErrText,
             })
           ) {

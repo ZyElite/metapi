@@ -2,8 +2,8 @@ import type { IncomingMessage } from 'node:http';
 import WebSocket from 'ws';
 import {
   extractResponsesTerminalResponseId,
-  isResponsesPreviousResponseNotFoundError,
   shouldInferResponsesPreviousResponseId,
+  shouldRetryWithoutResponsesPreviousResponseId,
   stripResponsesPreviousResponseId,
   withResponsesPreviousResponseId,
 } from '../../transformers/openai/responses/continuation.js';
@@ -295,7 +295,7 @@ async function sendSessionRequestAttempt(
         if (settled) return;
         if (
           isRuntimeErrorEvent(parsed)
-          || isResponsesPreviousResponseNotFoundError({
+          || shouldRetryWithoutResponsesPreviousResponseId({
             payload: parsed,
             rawErrText: extractTerminalErrorMessage(parsed),
           })
@@ -362,7 +362,7 @@ async function sendSessionRequest(
       if (
         previousResponseRecoveryTried
         || !(error instanceof CodexWebsocketRuntimeError)
-        || !isResponsesPreviousResponseNotFoundError({
+        || !shouldRetryWithoutResponsesPreviousResponseId({
           payload: error.payload ?? error.events[error.events.length - 1],
           rawErrText: error.message,
         })

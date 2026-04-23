@@ -759,6 +759,119 @@ describe('responses websocket transport', () => {
     });
   });
 
+  it('treats compaction replay follow-up turns as full transcripts on websocket-capable upstreams', async () => {
+    const selectedChannel = createSelectedChannel({
+      siteUrl: upstreamSiteUrl,
+    });
+    selectChannelMock.mockReturnValue(selectedChannel);
+    previewSelectedChannelMock.mockResolvedValue(selectedChannel);
+    upstreamMessageHandler = (socket, parsed, requestIndex) => {
+      if (requestIndex === 1) {
+        socket.send(JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_compaction_ws_1',
+            object: 'response',
+            model: parsed.model || 'gpt-5.4',
+            status: 'completed',
+            output: [
+              {
+                id: 'msg_prior_1',
+                type: 'message',
+                role: 'assistant',
+                status: 'completed',
+                content: [{ type: 'output_text', text: 'prior output' }],
+              },
+            ],
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+              total_tokens: 2,
+            },
+          },
+        }));
+        return;
+      }
+
+      socket.send(JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_compaction_ws_2',
+          object: 'response',
+          model: parsed.model || 'gpt-5.4',
+          status: 'completed',
+          output: [],
+          usage: {
+            input_tokens: 2,
+            output_tokens: 1,
+            total_tokens: 3,
+          },
+        },
+      }));
+    };
+
+    const socket = createClientSocket(baseUrl, {
+      session_id: 'ws-session-compaction-replay',
+    });
+    await waitForSocketOpen(socket);
+
+    const firstResponsePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'response.completed' && message?.response?.id === 'resp_compaction_ws_1',
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [],
+    }));
+    await firstResponsePromise;
+
+    const secondResponsePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'response.completed' && message?.response?.id === 'resp_compaction_ws_2',
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [
+        {
+          id: 'cmp_ws_1',
+          type: 'compaction',
+          encrypted_content: 'enc_compacted_turn',
+        },
+        {
+          id: 'tool_out_ws_compaction_1',
+          type: 'function_call_output',
+          call_id: 'call_ws_compaction_1',
+          output: '{"ok":true}',
+        },
+      ],
+    }));
+    await secondResponsePromise;
+    socket.close();
+
+    expect(upstreamRequests).toHaveLength(2);
+    expect(upstreamRequests[1]).toMatchObject({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      input: [
+        {
+          id: 'cmp_ws_1',
+          type: 'compaction',
+          encrypted_content: 'enc_compacted_turn',
+        },
+        {
+          id: 'tool_out_ws_compaction_1',
+          type: 'function_call_output',
+          call_id: 'call_ws_compaction_1',
+          output: '{"ok":true}',
+        },
+      ],
+    });
+    expect(upstreamRequests[1]?.previous_response_id).toBeUndefined();
+    expect((upstreamRequests[1]?.input as unknown[]) || []).toHaveLength(2);
+  });
+
   it('infers previous_response_id for websocket tool-output follow-up turns when the client only sends conversation_id', async () => {
     const selectedChannel = createSelectedChannel({
       siteUrl: upstreamSiteUrl,
@@ -956,6 +1069,84 @@ describe('responses websocket transport', () => {
           id: 'tool_out_ws_retry_1',
           type: 'function_call_output',
           call_id: 'call_ws_retry_1',
+          output: '{"retry":true}',
+        },
+      ],
+    });
+    expect(upstreamRequests[1]?.previous_response_id).toBeUndefined();
+  });
+
+  it('retries websocket turns once without previous_response_id when the upstream rejects the parameter as unsupported', async () => {
+    const selectedChannel = createSelectedChannel({
+      siteUrl: upstreamSiteUrl,
+    });
+    selectChannelMock.mockReturnValue(selectedChannel);
+    previewSelectedChannelMock.mockResolvedValue(selectedChannel);
+    upstreamMessageHandler = (socket, _parsed, requestIndex) => {
+      if (requestIndex === 1) {
+        socket.send(JSON.stringify({
+          type: 'error',
+          error: {
+            message: 'Unsupported parameter: previous_response_id',
+            type: 'invalid_request_error',
+          },
+        }));
+        return;
+      }
+      socket.send(JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_upstream_recovered_unsupported',
+          object: 'response',
+          model: 'gpt-5.4',
+          status: 'completed',
+          output: [],
+          usage: {
+            input_tokens: 1,
+            output_tokens: 1,
+            total_tokens: 2,
+          },
+        },
+      }));
+    };
+
+    const socket = createClientSocket(baseUrl, {
+      session_id: 'ws-session-prev-unsupported-recovery',
+    });
+    await waitForSocketOpen(socket);
+
+    const responsePromise = waitForSocketMessageMatching(
+      socket,
+      (message) => message?.type === 'response.completed' && message?.response?.id === 'resp_upstream_recovered_unsupported',
+    );
+    socket.send(JSON.stringify({
+      type: 'response.create',
+      model: 'gpt-5.4',
+      previous_response_id: 'resp_unsupported_ws',
+      input: [
+        {
+          id: 'tool_out_ws_retry_unsupported_1',
+          type: 'function_call_output',
+          call_id: 'call_ws_retry_unsupported_1',
+          output: '{"retry":true}',
+        },
+      ],
+    }));
+    await responsePromise;
+    socket.close();
+
+    expect(upstreamRequests).toHaveLength(2);
+    expect(upstreamRequests[0]).toMatchObject({
+      type: 'response.create',
+      previous_response_id: 'resp_unsupported_ws',
+    });
+    expect(upstreamRequests[1]).toMatchObject({
+      type: 'response.create',
+      input: [
+        {
+          id: 'tool_out_ws_retry_unsupported_1',
+          type: 'function_call_output',
+          call_id: 'call_ws_retry_unsupported_1',
           output: '{"retry":true}',
         },
       ],

@@ -2,8 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import {
   extractResponsesTerminalResponseId,
+  hasResponsesFullTranscriptReplayInput,
   isResponsesPreviousResponseNotFoundError,
+  isResponsesPreviousResponseUnsupportedError,
   shouldInferResponsesPreviousResponseId,
+  shouldRetryWithoutResponsesPreviousResponseId,
   stripResponsesPreviousResponseId,
   withResponsesPreviousResponseId,
 } from './continuation.js';
@@ -34,6 +37,50 @@ describe('responses continuation helpers', () => {
         content: [{ type: 'input_text', text: 'hello' }],
       }],
     }, 'resp_prev_1')).toBe(false);
+
+    expect(shouldInferResponsesPreviousResponseId({
+      input: [
+        {
+          type: 'compaction',
+          encrypted_content: 'enc_compacted',
+        },
+        {
+          type: 'function_call_output',
+          call_id: 'call_1',
+          output: '{"ok":true}',
+        },
+      ],
+    }, 'resp_prev_1')).toBe(false);
+  });
+
+  it('detects full-transcript replay markers from compaction inputs', () => {
+    expect(hasResponsesFullTranscriptReplayInput([
+      {
+        type: 'compaction',
+        encrypted_content: 'enc_compacted',
+      },
+    ])).toBe(true);
+
+    expect(hasResponsesFullTranscriptReplayInput([
+      {
+        type: 'message',
+        role: 'assistant',
+        content: [
+          {
+            type: 'compaction_summary',
+            text: 'summary',
+          },
+        ],
+      },
+    ])).toBe(true);
+
+    expect(hasResponsesFullTranscriptReplayInput([
+      {
+        type: 'function_call_output',
+        call_id: 'call_1',
+        output: '{"ok":true}',
+      },
+    ])).toBe(false);
   });
 
   it('adds and removes previous_response_id without mutating other fields', () => {
@@ -81,6 +128,45 @@ describe('responses continuation helpers', () => {
     })).toBe(true);
 
     expect(isResponsesPreviousResponseNotFoundError({
+      rawErrText: JSON.stringify({
+        error: {
+          code: 'rate_limit_exceeded',
+          message: 'too many requests',
+        },
+      }),
+    })).toBe(false);
+  });
+
+  it('detects unsupported previous_response_id errors and retries without the field', () => {
+    expect(isResponsesPreviousResponseUnsupportedError({
+      rawErrText: JSON.stringify({
+        error: {
+          message: 'Unsupported parameter: previous_response_id',
+          type: 'invalid_request_error',
+        },
+      }),
+    })).toBe(true);
+
+    expect(shouldRetryWithoutResponsesPreviousResponseId({
+      payload: {
+        type: 'error',
+        error: {
+          message: "Unknown parameter: 'previous_response_id'",
+          type: 'invalid_request_error',
+        },
+      },
+    })).toBe(true);
+
+    expect(shouldRetryWithoutResponsesPreviousResponseId({
+      rawErrText: JSON.stringify({
+        error: {
+          code: 'previous_response_not_found',
+          message: 'previous_response_not_found',
+        },
+      }),
+    })).toBe(true);
+
+    expect(shouldRetryWithoutResponsesPreviousResponseId({
       rawErrText: JSON.stringify({
         error: {
           code: 'rate_limit_exceeded',
