@@ -87,7 +87,6 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
     if (input.downstreamFormat !== 'openai' || !chatAggregateState) return false;
     for (const choice of chatAggregateState.choices.values()) {
       if (choice.content.length > 0) return true;
-      if (choice.reasoning.length > 0) return true;
       if (choice.toolCalls.some((item) => item.id || item.name || item.arguments)) return true;
     }
     return false;
@@ -100,13 +99,11 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
       : [];
     if (choices.some((choice) => (
       choice.content.length > 0
-      || choice.reasoningContent.length > 0
       || choice.toolCalls.some((toolCall) => toolCall.id || toolCall.name || toolCall.arguments)
     ))) {
       return true;
     }
     if (terminalNormalizedFinal.content.length > 0) return true;
-    if (terminalNormalizedFinal.reasoningContent.length > 0) return true;
     return terminalNormalizedFinal.toolCalls.some((toolCall) => toolCall.id || toolCall.name || toolCall.arguments);
   };
 
@@ -317,7 +314,7 @@ export function createChatProxyStreamSession(input: ChatProxyStreamSessionInput)
         emitLines(
           buildNormalizedFinalToOpenAiChatChunks(normalizedFinal)
             .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`),
-          { meaningful: true },
+          { meaningful: hasMeaningfulNormalizedFinalOutput() },
         );
       } else {
         emitLines(

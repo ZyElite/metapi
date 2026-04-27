@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { config } from '../config.js';
-import { detectProxyFailure } from './proxyFailureJudge.js';
+import { detectEmptyFinalResultFailure, detectProxyFailure, hasMeaningfulFinalResult } from './proxyFailureJudge.js';
 
 describe('detectProxyFailure (empty content)', () => {
   const originalEmptyFail = config.proxyEmptyContentFailEnabled;
@@ -135,5 +135,39 @@ describe('detectProxyFailure (empty content)', () => {
     });
 
     expect(failure).toMatchObject({ status: 502 });
+  });
+
+  it('treats reasoning-only final responses as empty final results', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    expect(detectEmptyFinalResultFailure({
+      content: '',
+      toolCalls: [],
+    })).toMatchObject({ status: 502 });
+    expect(hasMeaningfulFinalResult({
+      content: '',
+      toolCalls: [],
+    })).toBe(false);
+  });
+
+  it('does not treat tool-call-only final responses as empty final results', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    expect(detectEmptyFinalResultFailure({
+      content: '',
+      toolCalls: [{
+        id: 'call_1',
+        name: 'lookup',
+        arguments: '{"q":"cat"}',
+      }],
+    })).toBeNull();
+    expect(hasMeaningfulFinalResult({
+      content: '',
+      toolCalls: [{
+        id: 'call_1',
+        name: 'lookup',
+        arguments: '{"q":"cat"}',
+      }],
+    })).toBe(true);
   });
 });

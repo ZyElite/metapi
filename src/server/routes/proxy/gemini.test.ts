@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../../config.js';
 import { resetUpstreamEndpointRuntimeState } from '../../services/upstreamEndpointRuntimeMemory.js';
 
 const fetchMock = vi.fn();
@@ -203,6 +204,7 @@ describe('gemini native proxy routes', () => {
     safeUpdateSurfaceProxyDebugCandidatesMock.mockReset();
     safeInsertSurfaceProxyDebugAttemptMock.mockReset();
     safeFinalizeSurfaceProxyDebugTraceMock.mockReset();
+    config.proxyEmptyContentFailEnabled = false;
 
     startSurfaceProxyDebugTraceMock.mockResolvedValue({
       traceId: 801,
@@ -2116,6 +2118,75 @@ describe('gemini native proxy routes', () => {
     expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
       errorText: 'socket hang up',
     }));
+  });
+
+  it('retries Gemini non-stream requests when the upstream only returns thought parts with empty final content', async () => {
+    config.proxyEmptyContentFailEnabled = true;
+    config.proxyMaxChannelAttempts = 2;
+    selectNextChannelMock.mockReturnValue({
+      channel: { id: 12, routeId: 22 },
+      site: { id: 45, name: 'gemini-site-2', url: 'https://generativelanguage.googleapis.com', platform: 'gemini' },
+      account: { id: 34, username: 'demo-user-2' },
+      tokenName: 'fallback',
+      tokenValue: 'gemini-key-2',
+      actualModel: 'gemini-2.5-flash',
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            role: 'model',
+            parts: [{ text: 'plan only', thought: true }],
+          },
+          finishReason: 'STOP',
+        }],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 5,
+          totalTokenCount: 15,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        candidates: [{
+          content: {
+            role: 'model',
+            parts: [{ text: 'visible answer after retry' }],
+          },
+          finishReason: 'STOP',
+        }],
+        usageMetadata: {
+          promptTokenCount: 10,
+          candidatesTokenCount: 6,
+          totalTokenCount: 16,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1beta/models/gemini-2.5-flash:generateContent',
+      headers: {
+        'x-goog-api-key': 'sk-managed-gemini',
+      },
+      payload: {
+        contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(response.json()?.candidates?.[0]?.content?.parts?.[0]?.text).toBe('visible answer after retry');
+    expect(recordFailureMock).toHaveBeenCalledWith(11, expect.objectContaining({
+      status: 502,
+      errorText: 'Upstream returned empty content',
+    }));
+    expect(recordSuccessMock).toHaveBeenCalledWith(12, expect.any(Number), 0, 'gemini-2.5-flash');
   });
 
   it('falls back to the next channel for SSE requests before any bytes are written', async () => {

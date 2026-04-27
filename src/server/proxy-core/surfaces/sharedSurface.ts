@@ -602,6 +602,7 @@ export function createSurfaceFailureToolkit(input: {
       requestedModel: string;
       modelName: string;
       failure: { status: number; reason: string };
+      alwaysRetry?: boolean;
       isStream?: boolean | null;
       firstByteLatencyMs?: number | null;
       latencyMs: number;
@@ -632,7 +633,7 @@ export function createSurfaceFailureToolkit(input: {
         upstreamPath: args.upstreamPath,
       });
 
-      if (shouldRetryProxyRequest(args.failure.status, args.failure.reason)) {
+      if (args.alwaysRetry || shouldRetryProxyRequest(args.failure.status, args.failure.reason)) {
         const retry = maybeRetry(args.retryCount);
         if (retry) return retry;
       }

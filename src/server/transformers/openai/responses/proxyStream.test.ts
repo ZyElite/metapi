@@ -1,8 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
+import { config } from '../../../config.js';
 import { createResponsesProxyStreamSession } from './proxyStream.js';
 
 describe('createResponsesProxyStreamSession', () => {
+  const originalEmptyFail = config.proxyEmptyContentFailEnabled;
+
+  afterEach(() => {
+    config.proxyEmptyContentFailEnabled = originalEmptyFail;
+  });
+
   it('serializes non-SSE fallback payloads into canonical responses SSE closeout events', () => {
     const lines: string[] = [];
     let ended = false;
@@ -68,6 +75,66 @@ describe('createResponsesProxyStreamSession', () => {
     expect(output).toContain('"type":"response.completed"');
     expect(output).toContain('"output_text":"hello from responses upstream"');
     expect(output).toContain('data: [DONE]');
+  });
+
+  it('fails reasoning-only fallback payloads before writing any downstream SSE lines when empty-content failure is enabled', () => {
+    config.proxyEmptyContentFailEnabled = true;
+
+    const lines: string[] = [];
+    let ended = false;
+    const usage = {
+      promptTokens: 5,
+      completionTokens: 4,
+      totalTokens: 9,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      promptTokensIncludeCache: null,
+    };
+    const payload = {
+      id: 'resp_reasoning_only',
+      object: 'response',
+      status: 'completed',
+      model: 'gpt-5.2',
+      output: [{
+        id: 'rs_1',
+        type: 'reasoning',
+        status: 'completed',
+        summary: [{ type: 'summary_text', text: 'plan only' }],
+      }],
+      output_text: '',
+      usage: {
+        input_tokens: usage.promptTokens,
+        output_tokens: usage.completionTokens,
+        total_tokens: usage.totalTokens,
+      },
+    };
+
+    const session = createResponsesProxyStreamSession({
+      modelName: 'gpt-5.2',
+      successfulUpstreamPath: '/v1/responses',
+      getUsage: () => usage,
+      writeLines: (nextLines) => {
+        lines.push(...nextLines);
+      },
+      writeRaw: () => {},
+    });
+
+    const result = session.consumeUpstreamFinalPayload(
+      payload,
+      JSON.stringify(payload),
+      {
+        end() {
+          ended = true;
+        },
+      },
+    );
+
+    expect(result).toEqual({
+      status: 'failed',
+      errorMessage: 'Upstream returned empty content',
+    });
+    expect(ended).toBe(true);
+    expect(lines).toEqual([]);
   });
 
   it('preserves the canonical [DONE] terminator after an explicit response.completed SSE event', async () => {

@@ -23,7 +23,7 @@ import {
   recordDownstreamCostUsage,
 } from '../../routes/proxy/downstreamPolicy.js';
 import { executeEndpointFlow, type BuiltEndpointRequest } from '../orchestration/endpointFlow.js';
-import { detectProxyFailure } from '../../services/proxyFailureJudge.js';
+import { detectEmptyFinalResultFailure, detectProxyFailure } from '../../services/proxyFailureJudge.js';
 import { openAiChatTransformer } from '../../transformers/openai/chat/index.js';
 import { anthropicMessagesTransformer } from '../../transformers/anthropic/messages/index.js';
 import { shouldPreferResponsesForAnthropicContinuation } from '../../transformers/anthropic/messages/compatibility.js';
@@ -677,7 +677,12 @@ export async function handleChatSurfaceRequest(
           upstreamUsagePresent = upstreamUsagePresent || hasProxyUsagePayload(fallbackData);
           parsedUsage = mergeProxyUsage(parsedUsage, parseProxyUsage(fallbackData));
           const latency = Date.now() - startTime;
-          const failure = detectProxyFailure({ rawText, usage: parsedUsage });
+          const normalizedFinal = downstreamTransformer.transformFinalResponse(fallbackData, modelName);
+          const rawFailure = detectProxyFailure({ rawText, usage: parsedUsage });
+          const finalResultFailure = rawFailure
+            ? null
+            : detectEmptyFinalResultFailure(normalizedFinal);
+          const failure = rawFailure ?? finalResultFailure;
           if (failure) {
             clearSurfaceStickyChannel({
               stickySessionKey,
@@ -694,6 +699,7 @@ export async function handleChatSurfaceRequest(
               completionTokens: parsedUsage.completionTokens,
               totalTokens: parsedUsage.totalTokens,
               upstreamPath: successfulUpstreamPath,
+              alwaysRetry: !!finalResultFailure,
             });
             const terminalFailureOutcome = failureOutcome.action === 'retry'
               ? (canRetryChannelSelection(retryCount, forcedChannelId)
@@ -879,7 +885,12 @@ export async function handleChatSurfaceRequest(
       const latency = Date.now() - startTime;
       const parsedUsage = parseProxyUsage(upstreamData);
       const upstreamUsagePresent = hasProxyUsagePayload(upstreamData);
-      const failure = detectProxyFailure({ rawText, usage: parsedUsage });
+      const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName);
+      const rawFailure = detectProxyFailure({ rawText, usage: parsedUsage });
+      const finalResultFailure = rawFailure
+        ? null
+        : detectEmptyFinalResultFailure(normalizedFinal);
+      const failure = rawFailure ?? finalResultFailure;
       if (failure) {
         clearSurfaceStickyChannel({
           stickySessionKey,
@@ -896,6 +907,7 @@ export async function handleChatSurfaceRequest(
           completionTokens: parsedUsage.completionTokens,
           totalTokens: parsedUsage.totalTokens,
           upstreamPath: successfulUpstreamPath,
+          alwaysRetry: !!finalResultFailure,
         });
         const terminalFailureOutcome = failureOutcome.action === 'retry'
           ? (canRetryChannelSelection(retryCount, forcedChannelId)
@@ -913,7 +925,6 @@ export async function handleChatSurfaceRequest(
         );
         return reply.code(terminalFailureOutcome.status).send(terminalFailureOutcome.payload);
       }
-      const normalizedFinal = downstreamTransformer.transformFinalResponse(upstreamData, modelName, rawText);
       const downstreamResponse = downstreamTransformer.serializeFinalResponse(normalizedFinal, parsedUsage);
 
       await recordSurfaceSuccess({

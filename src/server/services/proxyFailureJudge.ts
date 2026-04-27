@@ -12,6 +12,11 @@ type UsageSummary = {
   totalTokens?: number;
 };
 
+type FinalResultSummary = {
+  content?: unknown;
+  toolCalls?: unknown;
+};
+
 function normalizeKeywords(values: string[]): string[] {
   return values
     .map((item) => (typeof item === 'string' ? item.trim() : ''))
@@ -38,6 +43,23 @@ function hasToolCallLike(value: unknown): boolean {
   if (Array.isArray(value)) return value.length > 0;
   if (isRecord(value)) return Object.keys(value).length > 0;
   return false;
+}
+
+export function hasMeaningfulFinalResult(value: FinalResultSummary | null | undefined): boolean {
+  if (!value) return false;
+  if (hasNonEmptyString(value.content)) return true;
+  return hasToolCallLike(value.toolCalls);
+}
+
+export function detectEmptyFinalResultFailure(
+  value: FinalResultSummary | null | undefined,
+): FailureResult | null {
+  if (!config.proxyEmptyContentFailEnabled) return null;
+  if (hasMeaningfulFinalResult(value)) return null;
+  return {
+    status: 502,
+    reason: 'Upstream returned empty content',
+  };
 }
 
 function hasCompletionContentFromChoice(choice: any): boolean {

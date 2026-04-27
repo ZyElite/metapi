@@ -2,8 +2,6 @@ import { createProxyStreamLifecycle } from '../../shared/protocolLifecycle.js';
 import { type ParsedSseEvent } from '../../shared/normalized.js';
 import { completeResponsesStream, createOpenAiResponsesAggregateState, failResponsesStream, serializeConvertedResponsesEvents } from './aggregator.js';
 import {
-  hasMeaningfulResponsesOutputItem,
-  hasMeaningfulResponsesPayloadOutput,
   openAiResponsesStream,
   preserveMeaningfulResponsesTerminalPayload,
   serializeResponsesUpstreamFinalAsStream,
@@ -50,26 +48,58 @@ function asTrimmedString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function hasMeaningfulAggregateOutput(state: ReturnType<typeof createOpenAiResponsesAggregateState>): boolean {
-  return state.outputItems.some((item) => hasMeaningfulResponsesOutputItem(item));
+function hasNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasVisibleContentPart(part: unknown): boolean {
+  if (!isRecord(part)) return false;
+  const partType = asTrimmedString(part.type).toLowerCase();
+  if (partType === 'output_text' || partType === 'text') {
+    return hasNonEmptyString(part.text);
+  }
+  return (
+    partType.includes('function_call')
+    || partType.includes('tool_call')
+    || partType.includes('image')
+    || partType.includes('audio')
+    || partType.includes('file')
+  );
+}
+
+function hasVisibleResponsesOutputItem(item: unknown): boolean {
+  if (!isRecord(item)) return false;
+  const itemType = asTrimmedString(item.type).toLowerCase();
+  if (itemType === 'message') {
+    return Array.isArray(item.content) && item.content.some((part) => hasVisibleContentPart(part));
+  }
+  if (itemType === 'reasoning') {
+    return false;
+  }
+  return itemType.length > 0;
+}
+
+function hasVisibleResponsesPayloadOutput(payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  if (hasNonEmptyString(payload.output_text)) return true;
+  return Array.isArray(payload.output) && payload.output.some((item) => hasVisibleResponsesOutputItem(item));
+}
+
+function hasVisibleAggregateOutput(state: ReturnType<typeof createOpenAiResponsesAggregateState>): boolean {
+  return state.outputItems.some((item) => hasVisibleResponsesOutputItem(item));
 }
 
 function shouldFailEmptyResponsesCompletion(input: {
   payload: unknown;
   state: ReturnType<typeof createOpenAiResponsesAggregateState>;
-  usage: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
 }): boolean {
   if (!config.proxyEmptyContentFailEnabled) return false;
   const responsePayload = isRecord(input.payload) && isRecord(input.payload.response)
     ? input.payload.response
     : null;
-  if (hasMeaningfulAggregateOutput(input.state)) return false;
-  if (responsePayload && hasMeaningfulResponsesPayloadOutput(responsePayload)) return false;
-  return input.usage.completionTokens <= 0;
+  if (hasVisibleAggregateOutput(input.state)) return false;
+  if (responsePayload && hasVisibleResponsesPayloadOutput(responsePayload)) return false;
+  return true;
 }
 
 function getResponsesStreamFailureMessage(payload: unknown, fallback = 'upstream stream failed'): string {
@@ -99,6 +129,35 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
     status: 'completed',
     errorMessage: null,
   };
+  let forwardedDownstreamOutput = false;
+  const pendingLines: string[] = [];
+
+  const flushPendingLines = () => {
+    if (pendingLines.length <= 0) return;
+    input.writeLines([...pendingLines]);
+    pendingLines.length = 0;
+  };
+
+  const emitLines = (lines: string[], options?: { meaningful?: boolean; force?: boolean }) => {
+    if (lines.length <= 0) return;
+    if (forwardedDownstreamOutput) {
+      input.writeLines(lines);
+      return;
+    }
+    if (options?.force) {
+      pendingLines.length = 0;
+      forwardedDownstreamOutput = true;
+      input.writeLines(lines);
+      return;
+    }
+    if (options?.meaningful) {
+      forwardedDownstreamOutput = true;
+      flushPendingLines();
+      input.writeLines(lines);
+      return;
+    }
+    pendingLines.push(...lines);
+  };
 
   const finalize = () => {
     if (finalized) return;
@@ -107,17 +166,26 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       status: 'completed',
       errorMessage: null,
     };
-    input.writeLines(completeResponsesStream(responsesState, streamContext, input.getUsage()));
+    emitLines(
+      completeResponsesStream(responsesState, streamContext, input.getUsage()),
+      { meaningful: true },
+    );
   };
 
   const fail = (payload: unknown, fallbackMessage?: string) => {
     if (finalized) return;
     finalized = true;
+    const errorMessage = getResponsesStreamFailureMessage(payload, fallbackMessage);
     terminalResult = {
       status: 'failed',
-      errorMessage: getResponsesStreamFailureMessage(payload, fallbackMessage),
+      errorMessage,
     };
-    input.writeLines(failResponsesStream(responsesState, streamContext, input.getUsage(), payload));
+    const failureLines = failResponsesStream(responsesState, streamContext, input.getUsage(), payload);
+    if (forwardedDownstreamOutput || !/empty content/i.test(errorMessage)) {
+      input.writeLines(failureLines);
+      return;
+    }
+    pendingLines.length = 0;
   };
 
   const complete = () => {
@@ -195,7 +263,6 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         && shouldFailEmptyResponsesCompletion({
           payload: parsedPayload,
           state: responsesState,
-          usage: input.getUsage(),
         })
       ) {
         fail({
@@ -206,7 +273,10 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         }, 'Upstream returned empty content');
         return true;
       }
-      input.writeLines(convertedLines);
+      emitLines(convertedLines, {
+        meaningful: hasVisibleAggregateOutput(responsesState),
+        force: isFailureEvent,
+      });
       if (eventBlock.event === 'response.completed' || payloadType === 'response.completed' || isIncompleteEvent) {
         terminalEventSeen = true;
         complete();
@@ -214,12 +284,15 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       return false;
     }
 
-    input.writeLines(serializeConvertedResponsesEvents({
+    const convertedLines = serializeConvertedResponsesEvents({
       state: responsesState,
       streamContext,
       event: { contentDelta: eventBlock.data },
       usage: input.getUsage(),
-    }));
+    });
+    emitLines(convertedLines, {
+      meaningful: hasVisibleAggregateOutput(responsesState),
+    });
     return false;
   };
 
@@ -251,7 +324,6 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
       if (!isIncompletePayload && shouldFailEmptyResponsesCompletion({
         payload: { type: 'response.completed', response: streamPayload },
         state: responsesState,
-        usage: input.getUsage(),
       })) {
         fail({
           type: 'response.failed',
@@ -268,7 +340,13 @@ export function createResponsesProxyStreamSession(input: ResponsesProxyStreamSes
         status: 'completed',
         errorMessage: null,
       };
-      input.writeLines(lines);
+      emitLines(lines, {
+        meaningful: hasVisibleResponsesPayloadOutput(streamPayload),
+      });
+      if (!forwardedDownstreamOutput) {
+        forwardedDownstreamOutput = true;
+        flushPendingLines();
+      }
       response?.end();
       return terminalResult;
     },

@@ -30,6 +30,7 @@ import {
 } from '../../transformers/gemini/generate-content/index.js';
 import { createChatEndpointStrategy } from '../../transformers/shared/chatEndpointStrategy.js';
 import { normalizeUpstreamFinalResponse } from '../../transformers/shared/normalized.js';
+import { detectEmptyFinalResultFailure } from '../../services/proxyFailureJudge.js';
 import { resolveAntigravityProviderAction } from '../providers/antigravityRuntime.js';
 import {
   createGeminiCliStreamReader,
@@ -1053,6 +1054,65 @@ export async function geminiProxyRoute(app: FastifyInstance) {
                 isStreamAction,
               );
             parsedUsage = parseProxyUsage(aggregateState);
+            const emptyFinalFailure = isCountTokensAction
+              ? null
+              : detectEmptyFinalResultFailure(normalizeUpstreamFinalResponse(unwrappedPayload, actualModel));
+            if (emptyFinalFailure) {
+              await tokenRouter.recordFailure?.(selected.channel.id, {
+                status: emptyFinalFailure.status,
+                errorText: emptyFinalFailure.reason,
+              });
+              await logProxy(
+                selected,
+                requestedModel,
+                'failed',
+                emptyFinalFailure.status,
+                Date.now() - startTime,
+                emptyFinalFailure.reason,
+                retryCount,
+                downstreamPath,
+                upstreamPath,
+                clientContext,
+                parsedUsage.promptTokens,
+                parsedUsage.completionTokens,
+                parsedUsage.totalTokens,
+                isStreamAction,
+                firstByteLatencyMs,
+              );
+              if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+                retryCount += 1;
+                continue;
+              }
+              await safeInsertSurfaceProxyDebugAttempt(debugTrace, {
+                attemptIndex: retryCount,
+                endpoint: isInternalGemini ? 'gemini-internal' : 'gemini-native',
+                requestPath: upstreamPath,
+                targetUrl: directDispatchState.targetUrl,
+                runtimeExecutor: directDispatchState.runtimeExecutor,
+                requestHeaders: directDispatchState.requestHeaders,
+                requestBody: directDispatchState.requestBody,
+                responseStatus: upstream.status,
+                responseHeaders: buildSurfaceProxyDebugResponseHeaders(upstream),
+                responseBody: responsePayload,
+                rawErrorText: emptyFinalFailure.reason,
+                recoverApplied,
+                downgradeDecision: false,
+                downgradeReason: null,
+                memoryWrite: null,
+              });
+              await finalizeDebugFailure(emptyFinalFailure.status, {
+                error: {
+                  message: emptyFinalFailure.reason,
+                  type: 'upstream_error',
+                },
+              }, upstreamPath);
+              return reply.code(emptyFinalFailure.status).send({
+                error: {
+                  message: emptyFinalFailure.reason,
+                  type: 'upstream_error',
+                },
+              });
+            }
             const latency = Date.now() - startTime;
             await recordGeminiChannelSuccessBestEffort(selected.channel.id, latency, actualModel);
             await logProxy(
@@ -1389,7 +1449,47 @@ export async function geminiProxyRoute(app: FastifyInstance) {
           upstreamData = JSON.parse(rawText);
         } catch {}
         const parsedUsage = parseProxyUsage(upstreamData);
-        const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, actualModel, rawText);
+        const normalizedFinal = normalizeUpstreamFinalResponse(upstreamData, actualModel);
+        const emptyFinalFailure = detectEmptyFinalResultFailure(normalizedFinal);
+        if (emptyFinalFailure) {
+          lastStatus = emptyFinalFailure.status;
+          lastContentType = 'application/json';
+          lastText = JSON.stringify({
+            error: {
+              message: emptyFinalFailure.reason,
+              type: 'upstream_error',
+            },
+          });
+          await tokenRouter.recordFailure?.(selected.channel.id, {
+            status: emptyFinalFailure.status,
+            errorText: emptyFinalFailure.reason,
+          });
+          await logProxy(
+            selected,
+            requestedModel,
+            'failed',
+            emptyFinalFailure.status,
+            Date.now() - startTime,
+            emptyFinalFailure.reason,
+            retryCount,
+            downstreamPath,
+            upstreamPath,
+            clientContext,
+            parsedUsage.promptTokens,
+            parsedUsage.completionTokens,
+            parsedUsage.totalTokens,
+            isStreamAction,
+            firstByteLatencyMs,
+          );
+          if (canRetryChannelSelection(retryCount, forcedChannelId)) {
+            retryCount += 1;
+            continue;
+          }
+          await finalizeDebugFailure(emptyFinalFailure.status, JSON.parse(lastText), upstreamPath).catch(async () => {
+            await finalizeDebugFailure(emptyFinalFailure.status, parseSurfaceProxyDebugTextPayload(lastText), upstreamPath);
+          });
+          return reply.code(emptyFinalFailure.status).type(lastContentType).send(lastText);
+        }
         const geminiResponse = geminiGenerateContentTransformer.compatibility.serializeNormalizedFinalToGemini({
           normalized: normalizedFinal,
           usage: {
