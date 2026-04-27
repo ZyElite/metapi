@@ -27,6 +27,7 @@ const originalProxyEmptyContentFailEnabled = config.proxyEmptyContentFailEnabled
 const originalProxyStickySessionEnabled = config.proxyStickySessionEnabled;
 const originalProxySessionChannelConcurrencyLimit = config.proxySessionChannelConcurrencyLimit;
 const originalProxySessionChannelQueueWaitMs = config.proxySessionChannelQueueWaitMs;
+const originalProxySessionChannelLeaseKeepaliveMs = config.proxySessionChannelLeaseKeepaliveMs;
 const dbInsertMock = vi.fn((_arg?: any) => ({
   values: (values: Record<string, unknown>) => {
     insertedProxyLogs.push(values);
@@ -190,6 +191,7 @@ describe('responses proxy codex oauth refresh', () => {
     config.proxyStickySessionEnabled = originalProxyStickySessionEnabled;
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    config.proxySessionChannelLeaseKeepaliveMs = originalProxySessionChannelLeaseKeepaliveMs;
     fetchMock.mockReset();
     selectChannelMock.mockReset();
     selectNextChannelMock.mockReset();
@@ -241,6 +243,7 @@ describe('responses proxy codex oauth refresh', () => {
     config.proxyStickySessionEnabled = originalProxyStickySessionEnabled;
     config.proxySessionChannelConcurrencyLimit = originalProxySessionChannelConcurrencyLimit;
     config.proxySessionChannelQueueWaitMs = originalProxySessionChannelQueueWaitMs;
+    config.proxySessionChannelLeaseKeepaliveMs = originalProxySessionChannelLeaseKeepaliveMs;
     if (app) {
       await app.close();
     }
@@ -291,7 +294,7 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondOptions.headers.Authorization).toBe('Bearer fresh-access-token');
     expect(secondOptions.headers.Originator || secondOptions.headers.originator).toBe('codex_cli_rs');
     expect(secondOptions.headers['Chatgpt-Account-Id'] || secondOptions.headers['chatgpt-account-id']).toBe('chatgpt-account-123');
-    expect(secondOptions.headers.Version || secondOptions.headers.version).toBe('0.101.0');
+    expect(secondOptions.headers.Version || secondOptions.headers.version).toBe('0.125.0');
     expect(String(secondOptions.headers.Session_id || secondOptions.headers.session_id || '')).toMatch(/^[0-9a-f-]{36}$/i);
     expect(secondOptions.headers.Conversation_id || secondOptions.headers.conversation_id).toBeUndefined();
     expect(secondOptions.headers['User-Agent'] || secondOptions.headers['user-agent']).toBe('CodexClient/1.0');
@@ -1395,6 +1398,148 @@ describe('responses proxy codex oauth refresh', () => {
     expect(secondBody.store).toBe(false);
     expect(secondBody.stream).toBe(true);
     expect(secondBody.max_output_tokens).toBeUndefined();
+  });
+
+  it('fails over before emitting client output when a responses stream fails during the preamble', async () => {
+    const fallbackSelection = {
+      channel: { id: 12, routeId: 22 },
+      site: { name: 'codex-site', url: 'https://chatgpt.com/backend-api/codex', platform: 'codex' },
+      account: {
+        id: 34,
+        username: 'codex-user-2@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'codex',
+            accountId: 'chatgpt-account-456',
+            email: 'codex-user-2@example.com',
+            planType: 'plus',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'fallback-access-token',
+      actualModel: 'gpt-5.5',
+    };
+    selectNextChannelMock.mockReturnValueOnce(fallbackSelection);
+
+    fetchMock
+      .mockResolvedValueOnce(createSseResponse([
+        'event: response.created\n',
+        'data: {"type":"response.created","response":{"id":"resp_preamble_fail_1","model":"gpt-5.5","created_at":1706000000,"status":"in_progress","output":[]}}\n\n',
+        'event: response.in_progress\n',
+        'data: {"type":"response.in_progress","response":{"id":"resp_preamble_fail_1","model":"gpt-5.5","status":"in_progress","output":[]}}\n\n',
+        'event: response.failed\n',
+        'data: {"type":"response.failed","error":{"message":"upstream processing failed"}}\n\n',
+        'data: [DONE]\n\n',
+      ]))
+      .mockResolvedValueOnce(createSseResponse([
+        'event: response.created\n',
+        'data: {"type":"response.created","response":{"id":"resp_after_failover_1","model":"gpt-5.5","created_at":1706000001,"status":"in_progress","output":[]}}\n\n',
+        'event: response.output_item.added\n',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_after_failover_1","type":"message","role":"assistant","status":"in_progress","content":[]}}\n\n',
+        'event: response.output_text.delta\n',
+        'data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_after_failover_1","delta":"hello after failover"}\n\n',
+        'event: response.completed\n',
+        'data: {"type":"response.completed","response":{"id":"resp_after_failover_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}\n\n',
+        'data: [DONE]\n\n',
+      ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.5',
+        input: 'hello codex',
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(response.body).toContain('hello after failover');
+    expect(response.body).not.toContain('upstream processing failed');
+    expect(response.body).not.toContain('resp_preamble_fail_1');
+    expect(recordFailureMock).toHaveBeenCalledTimes(1);
+    expect(recordSuccessMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the downstream responses stream alive with keepalive comments during pre-output failover', async () => {
+    config.proxySessionChannelLeaseKeepaliveMs = 15;
+
+    const fallbackSelection = {
+      channel: { id: 12, routeId: 22 },
+      site: { name: 'codex-site', url: 'https://chatgpt.com/backend-api/codex', platform: 'codex' },
+      account: {
+        id: 34,
+        username: 'codex-user-2@example.com',
+        extraConfig: JSON.stringify({
+          credentialMode: 'session',
+          oauth: {
+            provider: 'codex',
+            accountId: 'chatgpt-account-456',
+            email: 'codex-user-2@example.com',
+            planType: 'plus',
+          },
+        }),
+      },
+      tokenName: 'default',
+      tokenValue: 'fallback-access-token',
+      actualModel: 'gpt-5.5',
+    };
+    selectNextChannelMock.mockReturnValueOnce(fallbackSelection);
+
+    const encoder = new TextEncoder();
+    const delayedPreambleFailure = new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        void (async () => {
+          controller.enqueue(encoder.encode('event: response.created\ndata: {"type":"response.created","response":{"id":"resp_keepalive_fail_1","model":"gpt-5.5","created_at":1706000000,"status":"in_progress","output":[]}}\n\n'));
+          for (let index = 0; index < 4; index += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+            controller.enqueue(encoder.encode('event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"resp_keepalive_fail_1","model":"gpt-5.5","status":"in_progress","output":[]}}\n\n'));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          controller.enqueue(encoder.encode('event: response.failed\ndata: {"type":"response.failed","error":{"message":"upstream keepalive retry failed"}}\n\n'));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        })();
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+    });
+
+    fetchMock
+      .mockResolvedValueOnce(delayedPreambleFailure)
+      .mockResolvedValueOnce(createSseResponse([
+        'event: response.created\n',
+        'data: {"type":"response.created","response":{"id":"resp_keepalive_ok_1","model":"gpt-5.5","created_at":1706000001,"status":"in_progress","output":[]}}\n\n',
+        'event: response.output_item.added\n',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_keepalive_ok_1","type":"message","role":"assistant","status":"in_progress","content":[]}}\n\n',
+        'event: response.output_text.delta\n',
+        'data: {"type":"response.output_text.delta","output_index":0,"item_id":"msg_keepalive_ok_1","delta":"keepalive survived failover"}\n\n',
+        'event: response.completed\n',
+        'data: {"type":"response.completed","response":{"id":"resp_keepalive_ok_1","model":"gpt-5.5","status":"completed","usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}\n\n',
+        'data: [DONE]\n\n',
+      ]));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/responses',
+      payload: {
+        model: 'gpt-5.5',
+        input: 'hello codex',
+        stream: true,
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(selectNextChannelMock).toHaveBeenCalledTimes(1);
+    expect(response.body).toContain(':\n\n');
+    expect(response.body).toContain('keepalive survived failover');
+    expect(response.body).not.toContain('upstream keepalive retry failed');
   });
 
   it('does not record success when a streaming responses request ends with response.failed', async () => {

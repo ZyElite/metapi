@@ -646,17 +646,12 @@ describe('refreshModelsForAccount credential discovery', () => {
       status: 200,
       json: async () => ({
         models: [
+          { id: 'gpt-5.5' },
           { id: 'gpt-5.4' },
+          { id: 'gpt-5.4-mini' },
           { id: 'gpt-5.3-codex' },
           { id: 'gpt-5.2-codex' },
           { id: 'gpt-5.2' },
-          { id: 'gpt-5.1-codex-max' },
-          { id: 'gpt-5.1-codex' },
-          { id: 'gpt-5.1' },
-          { id: 'gpt-5-codex' },
-          { id: 'gpt-5' },
-          { id: 'gpt-5.1-codex-mini' },
-          { id: 'gpt-5-codex-mini' },
         ],
       }),
       text: async () => JSON.stringify({ ok: true }),
@@ -695,19 +690,15 @@ describe('refreshModelsForAccount credential discovery', () => {
       errorCode: null,
       tokenScanned: 0,
       discoveredByCredential: true,
-      modelCount: 11,
+      modelCount: 6,
     });
     expect(result.modelsPreview).toEqual([
+      'gpt-5.5',
       'gpt-5.4',
+      'gpt-5.4-mini',
       'gpt-5.3-codex',
       'gpt-5.2-codex',
       'gpt-5.2',
-      'gpt-5.1-codex-max',
-      'gpt-5.1-codex',
-      'gpt-5.1',
-      'gpt-5-codex',
-      'gpt-5',
-      'gpt-5.1-codex-mini',
     ]);
     expect(getModelsMock).not.toHaveBeenCalled();
     expect(undiciFetchMock).toHaveBeenCalledTimes(1);
@@ -726,17 +717,12 @@ describe('refreshModelsForAccount credential discovery', () => {
       .all();
     const modelNames = rows.map((row) => row.modelName);
     expect(modelNames.sort()).toEqual([
-      'gpt-5',
-      'gpt-5-codex',
-      'gpt-5-codex-mini',
-      'gpt-5.1',
-      'gpt-5.1-codex',
-      'gpt-5.1-codex-max',
-      'gpt-5.1-codex-mini',
       'gpt-5.2',
       'gpt-5.2-codex',
       'gpt-5.3-codex',
       'gpt-5.4',
+      'gpt-5.4-mini',
+      'gpt-5.5',
     ]);
   });
 

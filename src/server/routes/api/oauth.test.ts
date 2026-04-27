@@ -522,8 +522,8 @@ describe('oauth routes', { timeout: 15_000 }, () => {
         json: async () => ({
           models: [
             { id: 'gpt-5.2-codex' },
-            { id: 'gpt-5' },
             { id: 'gpt-5.4' },
+            { id: 'gpt-5.5' },
           ],
         }),
         text: async () => JSON.stringify({ ok: true }),
@@ -607,7 +607,7 @@ describe('oauth routes', { timeout: 15_000 }, () => {
 
     const models = await db.select().from(schema.modelAvailability).all();
     const modelNames = models.map((row) => row.modelName);
-    expect(modelNames.sort()).toEqual(['gpt-5', 'gpt-5.2-codex', 'gpt-5.4']);
+    expect(modelNames.sort()).toEqual(['gpt-5.2-codex', 'gpt-5.4', 'gpt-5.5']);
   });
 
   it('uses the stored account proxy when refreshing a codex oauth access token', async () => {
